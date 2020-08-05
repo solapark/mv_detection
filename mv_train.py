@@ -1566,6 +1566,13 @@ for epoch_num in range(num_epochs):
             # Convert rpn layer to roi bboxes
             #R = rpn_to_roi(P_rpn[0], P_rpn[1], C, K.image_dim_ordering(), use_regr=True, overlap_thresh=0.7, max_boxes=300)
             R = rpn_to_roi(P_rpn[0], P_rpn[1], C, K.common.image_dim_ordering(), use_regr=True, overlap_thresh=0.7, max_boxes=300)
+            R_list = []
+            for i in range(num_cam):
+                cam_idx = i*2
+                R = rpn_to_roi(P_rpn[cam_idx], P_rpn[cam_idx+1], C, K.common.image_dim_ordering(), use_regr=True, overlap_thresh=0.7, max_boxes=300)
+                R_list.append(R)
+            # grouped_R : list, len(grouped_R) = cam_num, top 300 grouped R where R in each cam is grouped by epipolar geometry. 
+            grouped_R = epipolar(R_list)
             
             # note: calc_iou converts from (x1,y1,x2,y2) to (x,y,w,h) format
             # X2: bboxes that iou > C.classifier_min_overlap for all gt bboxes in 300 non_max_suppression bboxes
