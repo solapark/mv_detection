@@ -1257,10 +1257,48 @@ def rpn_to_roi(rpn_layer, regr_layer, C, dim_ordering, use_regr=True, max_boxes=
 
 	# Apply non_max_suppression
 	# Only extract the bboxes. Don't need rpn probs in the later process
-	result = non_max_suppression_fast(all_boxes, all_probs, overlap_thresh=overlap_thresh, max_boxes=max_boxes)[0]
+	#result = non_max_suppression_fast(all_boxes, all_probs, overlap_thresh=overlap_thresh, max_boxes=max_boxes)[0]
+	result = non_max_suppression_fast(all_boxes, all_probs, overlap_thresh=overlap_thresh, max_boxes=max_boxes)
 
 	return result
 
+def epipolar(R_list, C) :
+    #0. sorting
+    prob_cam_box = np.array([])
+    for i, R in enumerate(R_list) :
+        box, prob = R
+        cam = np.full((len(box), ), float(i)) 
+        result = np.concatenate((prob, cam, box), axis = 1)
+        prob_cam_box.append(result) 
+    sort_result =  prob_cam_box[prob_cam_box[:, 0].argsort()]
+        
+    result = [list()*C.num_cam]
+    for cbp in sort_result : 
+        cur_cam = cbp[1]
+        box = cbp[2:]
+        cur_cam_center = get_center(box)
+        #1. get epipolar line in first cam.
+        epipolar_pnts = []
+        line_cam = -1
+        for i in range(C.num_cam):
+            if(i == cur_cam):
+                continue
+            epipolar_pnts = get_epipolar_line(cur_cam, i, center)
+            line_cam = i 
+            break
+        
+        for pnt in epipolar_pnts :
+            #2. push paired box.
+            result[cur_cam].append(box)
+            line_cam_box = get_closest_box(pnt)
+            result[line_cam].append(line_cam_box)
+            #3. find matched box in other cams and push them.
+            for i in range(C.num_cam):
+                if(i == cur_cam or i == line_cam): continue 
+                cur_cam_pnt = get_epipolar_pnt(cur_cam, line_cam, cur_cam_center, pnt, i) 
+                cur_cam_box = get_closest_box(cur_cam_pnt)
+                result[i].append(cur_cam_box)
+ 
 base_path = '/home/sap/frcnn_keras'
 
 train_path = '/home/sap/frcnn_keras/data/train.txt' 
@@ -1573,7 +1611,8 @@ for epoch_num in range(num_epochs):
                 R_list.append(R)
             # grouped_R : list, len(grouped_R) = cam_num, top 300 grouped R where R in each cam is grouped by epipolar geometry. 
             grouped_R = epipolar(R_list)
-            
+
+           
             # note: calc_iou converts from (x1,y1,x2,y2) to (x,y,w,h) format
             # X2: bboxes that iou > C.classifier_min_overlap for all gt bboxes in 300 non_max_suppression bboxes
             # Y1: one hot code for bboxes from above => x_roi (X)
