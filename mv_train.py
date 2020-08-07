@@ -1262,6 +1262,52 @@ def rpn_to_roi(rpn_layer, regr_layer, C, dim_ordering, use_regr=True, max_boxes=
 
 	return result
 
+def get_center(box):
+    x1, y1, x2, y2 = box
+    cx = (x1+x2)/2
+    cy = (y1+y2)/2
+    return (cx, cy)
+
+def computeEpilineStartEnd(pnt, F, x_max):
+    pnt_reshape = np.array(pnt).reshape(1,1,2)
+    line2 = cv2.computeCorrespondEpilines(pnt_reshape, 1, F)
+    line2 = line2.reshape((-1, 3))[0]
+    start = map(int, [0, -(line2[2])/line2[1] ])
+    end = map(int, [x_max, -(line2[2]+line2[0]*x_max)/line2[1] ])
+    return start, end
+ 
+
+def get_epipolar_line(src, dst, src_pnt, F, x_interval, x_max) :
+    cur_F = F[src][dst]
+    pnt = np.array(src_pnt).reshape(1,1,2)
+    line2 = cv2.computeCorrespondEpilines(pt1, 1,cur_F)
+    line2 = line2.reshape((-1, 3))[0]
+    line_list = []
+    x = 0
+    while x < x_max :
+        x1,y1 = map(int, [x, -(line2[2]+line2[0]*x)/line2[1] ])
+        line_list.append((x1, y1))
+        x += x_interval
+    return line_list 
+
+def get_epipolar_pnt(src1, src2, src1_pnt, src2_pnt, dst, F):
+    F1 = F[src1][dst]
+    F2 = F[src2][dst]
+    s1, e1 = computeEpilineStartEnd(src1_pnt, F1, x_max)
+    s2, e2 = computeEpilineStartEnd(src2_pnt, F2, x_max)
+    m1 = (e1[1]-s1[1]) / (e1[0]-s1[0])
+    y_intercept1 = s1[1]
+    m2 = (e2[1]-s2[1]) / (e2[0]-s2[0])
+    y_intercept2 = s2[1]
+
+    x = (y_intercept2-y_intercept1) / (m1-m2)
+    y = m1*x + y_intercept1
+
+    return map(int, [x, y])
+
+def get_closest_box(cur_cam_pnt): 
+
+
 def epipolar(R_list, C) :
     #0. sorting
     prob_cam_box = np.array([])
@@ -1283,7 +1329,7 @@ def epipolar(R_list, C) :
         for i in range(C.num_cam):
             if(i == cur_cam):
                 continue
-            epipolar_pnts = get_epipolar_line(cur_cam, i, center)
+            epipolar_pnts = get_epipolar_line(cur_cam, i, center, C.F, C.epipolar_x_interval, C.cols)
             line_cam = i 
             break
         
