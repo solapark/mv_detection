@@ -54,7 +54,8 @@ class Config:
 		# Anchor box scales
     # Note that if im_size is smaller, anchor_box_scales should be scaled
     # Original anchor_box_scales in the paper is [128, 256, 512]
-		self.anchor_box_scales = [64, 128, 256] 
+		#self.anchor_box_scales = [64, 128, 256] 
+		self.anchor_box_scales = [128, 256, 512] 
 
 		# Anchor box ratios
 		self.anchor_box_ratios = [[1, 1], [1./math.sqrt(2), 2./math.sqrt(2)], [2./math.sqrt(2), 1./math.sqrt(2)]]
@@ -92,6 +93,20 @@ class Config:
 		self.class_mapping = None
 
 		self.model_path = None
+
+        self.raw_img_rows = 360
+        self.raw_img_cols = 640
+        self.F = 0
+        self.epipolar_x_interval = 3
+        self.num_cam = 3
+
+        self.resize_img_cols= self.im_size #600
+        self.resize_img_rows= self.raw_img_rows * self.resize_img_cols / self.raw_img_cols #337
+        self.anchors = len(self.anchor_box_scales) * len(self.anchor_box_ratios) #9
+        self.grid_rows = int(self.resize_img_rows/self.rpn_stride)
+        self.grid_cols = int(self.resize_img_cols/self.rpn_stride)
+        self.whole_anchors = self.grid_rows * self.grid_cols * self.anchors
+ 
 
 def get_data(input_path):
 	"""Parse the data from annotation file
@@ -239,14 +254,17 @@ class RoiPoolingConv(Layer):
             w = rois[0, roi_idx, 2]
             h = rois[0, roi_idx, 3]
 
-            x = K.cast(x, 'int32')
-            y = K.cast(y, 'int32')
-            w = K.cast(w, 'int32')
-            h = K.cast(h, 'int32')
+            if(x == -1) :
+                rs = tf.zeros([self.pool_size, self.pool_size], tf.int32)
+            else : 
+                x = K.cast(x, 'int32')
+                y = K.cast(y, 'int32')
+                w = K.cast(w, 'int32')
+                h = K.cast(h, 'int32')
 
-            # Resized roi of the image to pooling size (7x7)
-            rs = tf.image.resize_images(img[:, y:y+h, x:x+w, :], (self.pool_size, self.pool_size))
-            #rs = tf.image.resize(img[:, y:y+h, x:x+w, :], (self.pool_size, self.pool_size))
+                # Resized roi of the image to pooling size (7x7)
+                rs = tf.image.resize_images(img[:, y:y+h, x:x+w, :], (self.pool_size, self.pool_size))
+                #rs = tf.image.resize(img[:, y:y+h, x:x+w, :], (self.pool_size, self.pool_size))
             outputs.append(rs)
                 
 
@@ -1057,46 +1075,58 @@ def apply_regr(x, y, w, h, tx, ty, tw, th):
         print(e)
         return x, y, w, h
 
-def calc_iou(R, img_data, C, class_mapping):
+def calc_iou(Grouped_R, img_data, C, class_mapping):
     """Converts from (x1,y1,x2,y2) to (x,y,w,h) format
 
     Args:
-        R: bboxes, probs
+        R: bboxes
     """
-    bboxes = img_data['bboxes']
+    bboxes_list = img_data['bboxes']
     (width, height) = (img_data['width'], img_data['height'])
     # get image dimensions for resizing
     (resized_width, resized_height) = get_new_img_size(width, height, C.im_size)
 
-    gta = np.zeros((len(bboxes), 4))
+    len_bboxes = len(bboxes[0])
+    gta_list = [np.zeros((len_bboxes, 4))]*C.num_cam
 
-    for bbox_num, bbox in enumerate(bboxes):
-        # get the GT box coordinates, and resize to account for image resizing
-        # gta[bbox_num, 0] = (40 * (600 / 800)) / 16 = int(round(1.875)) = 2 (x in feature map)
-        gta[bbox_num, 0] = int(round(bbox['x1'] * (resized_width / float(width))/C.rpn_stride))
-        gta[bbox_num, 1] = int(round(bbox['x2'] * (resized_width / float(width))/C.rpn_stride))
-        gta[bbox_num, 2] = int(round(bbox['y1'] * (resized_height / float(height))/C.rpn_stride))
-        gta[bbox_num, 3] = int(round(bbox['y2'] * (resized_height / float(height))/C.rpn_stride))
+    for bboxes, gta in zip(bboxes_list, gta_list) : 
+        for bbox_num, bbox in enumerate(bboxes):
+            # get the GT box coordinates, and resize to account for image resizing
+            # gta[bbox_num, 0] = (40 * (600 / 800)) / 16 = int(round(1.875)) = 2 (x in feature map)
+            gta[bbox_num, 0] = int(round(bbox['x1'] * (resized_width / float(width))/C.rpn_stride))
+            gta[bbox_num, 1] = int(round(bbox['x2'] * (resized_width / float(width))/C.rpn_stride))
+            gta[bbox_num, 2] = int(round(bbox['y1'] * (resized_height / float(height))/C.rpn_stride))
+            gta[bbox_num, 3] = int(round(bbox['y2'] * (resized_height / float(height))/C.rpn_stride))
 
-    x_roi = []
+    x_roi_list = [[]]*C.num_cam
     y_class_num = []
-    y_class_regr_coords = []
-    y_class_regr_label = []
+    y_class_regr_coords = [[]]*C.num_cam
+    y_class_regr_label = [[]]*C.num_cam
     IoUs = [] # for debugging only
 
     # R.shape[0]: number of bboxes (=300 from non_max_suppression)
     for ix in range(R.shape[0]):
-        (x1, y1, x2, y2) = R[ix, :]
-        x1 = int(round(x1))
-        y1 = int(round(y1))
-        x2 = int(round(x2))
-        y2 = int(round(y2))
-
+        x1s, y1s, x2s, y2s = [], [], [], []
+        for R in grouped_R :
+            (x1, y1, x2, y2) = R[ix, :]
+            x1s.append(int(round(x1)))
+            y1s.append(int(round(y1)))
+            x2s.append(int(round(x2)))
+            y2s.append(int(round(y2)))
         best_iou = 0.0
         best_bbox = -1
         # Iterate through all the ground-truth bboxes to calculate the iou
         for bbox_num in range(len(bboxes)):
-            curr_iou = iou([gta[bbox_num, 0], gta[bbox_num, 2], gta[bbox_num, 1], gta[bbox_num, 3]], [x1, y1, x2, y2])
+            #curr_iou = iou([gta[bbox_num, 0], gta[bbox_num, 2], gta[bbox_num, 1], gta[bbox_num, 3]], [x1, y1, x2, y2])
+            curr_iou = 0
+            #num_valid_cam = 0
+            for x1, y1, x2, y2, gta in zip(x1s, y1s, x2s, y2s, gta_list) : 
+                curr_iou_in_one_cam = iou([gta[bbox_num, 0], gta[bbox_num, 2], gta[bbox_num, 1], gta[bbox_num, 3]], [x1, y1, x2, y2])
+                if(curr_iou_in_one_cam > 0):
+                    #num_valid_cam += 1
+                    curr_iou += curr_iou_in_one_cam
+            #curr_iou /= num_valid_cam
+            curr_iou /= num_cam
 
             # Find out the corresponding ground-truth bbox_num with larget iou
             if curr_iou > best_iou:
@@ -1106,9 +1136,13 @@ def calc_iou(R, img_data, C, class_mapping):
         if best_iou < C.classifier_min_overlap:
                 continue
         else:
-            w = x2 - x1
-            h = y2 - y1
-            x_roi.append([x1, y1, w, h])
+            ws, hs = [], []
+            for x1, y1, x2, y2, x_roi in zip(x1s, y1s, x2s, y2s, x_roi_list):
+                w = x2 - x1
+                h = y2 - y1
+                ws.append(w)
+                hs.append(h)
+                x_roi.append([x1, y1, w, h])
             IoUs.append(best_iou)
 
             if C.classifier_min_overlap <= best_iou < C.classifier_max_overlap:
@@ -1116,16 +1150,22 @@ def calc_iou(R, img_data, C, class_mapping):
                 cls_name = 'bg'
             elif C.classifier_max_overlap <= best_iou:
                 cls_name = bboxes[best_bbox]['class']
-                cxg = (gta[best_bbox, 0] + gta[best_bbox, 1]) / 2.0
-                cyg = (gta[best_bbox, 2] + gta[best_bbox, 3]) / 2.0
+                txs, tys, tws, ths = [], [], [], []
+                for x1, y1, w, h, gta in zip(x1s, y1s, ws, hs, gta_list) : 
+                    cxg = (gta[best_bbox, 0] + gta[best_bbox, 1]) / 2.0
+                    cyg = (gta[best_bbox, 2] + gta[best_bbox, 3]) / 2.0
 
-                cx = x1 + w / 2.0
-                cy = y1 + h / 2.0
+                    cx = x1 + w / 2.0
+                    cy = y1 + h / 2.0
 
-                tx = (cxg - cx) / float(w)
-                ty = (cyg - cy) / float(h)
-                tw = np.log((gta[best_bbox, 1] - gta[best_bbox, 0]) / float(w))
-                th = np.log((gta[best_bbox, 3] - gta[best_bbox, 2]) / float(h))
+                    tx = (cxg - cx) / float(w)
+                    ty = (cyg - cy) / float(h)
+                    tw = np.log((gta[best_bbox, 1] - gta[best_bbox, 0]) / float(w))
+                    th = np.log((gta[best_bbox, 3] - gta[best_bbox, 2]) / float(h))
+                    txs.append(tx)
+                    tys.append(ty)
+                    tws.append(tw)
+                    ths.append(th)
             else:
                 print('roi = {}'.format(best_iou))
                 raise RuntimeError
@@ -1134,30 +1174,43 @@ def calc_iou(R, img_data, C, class_mapping):
         class_label = len(class_mapping) * [0]
         class_label[class_num] = 1
         y_class_num.append(copy.deepcopy(class_label))
+        coords_list, labels_list = [], []
         coords = [0] * 4 * (len(class_mapping) - 1)
         labels = [0] * 4 * (len(class_mapping) - 1)
+        coords_list = [coords]*num_cam
+        labels_list = [labels]*num_cam
         if cls_name != 'bg':
             label_pos = 4 * class_num
             sx, sy, sw, sh = C.classifier_regr_std
-            coords[label_pos:4+label_pos] = [sx*tx, sy*ty, sw*tw, sh*th]
-            labels[label_pos:4+label_pos] = [1, 1, 1, 1]
-            y_class_regr_coords.append(copy.deepcopy(coords))
-            y_class_regr_label.append(copy.deepcopy(labels))
+            for coords, labels, tx, ty, tw, th, y_class_regr_coords, y_class_regr_label in zip(coords_list, labels_list, txs, tys, tws, ths, y_class_regr_coords_list, y_class_regr_label_list) : 
+                coords[label_pos:4+label_pos] = [sx*tx, sy*ty, sw*tw, sh*th]
+                labels[label_pos:4+label_pos] = [1, 1, 1, 1]
+                y_class_regr_coords.append(copy.deepcopy(coords))
+                y_class_regr_label.append(copy.deepcopy(labels))
         else:
-            y_class_regr_coords.append(copy.deepcopy(coords))
-            y_class_regr_label.append(copy.deepcopy(labels))
+            for coords, labels, y_class_regr_coords, y_class_regr_label in zip(coords_list, labels_list, y_class_regr_coords_list, y_class_regr_label_list) : 
+                y_class_regr_coords.append(copy.deepcopy(coords))
+                y_class_regr_label.append(copy.deepcopy(labels))
 
-    if len(x_roi) == 0:
-        return None, None, None, None
+    if len(x_roi_list[0]) == 0:
+        return [[None, None, None, None]]*C.num_cam
 
-    # bboxes that iou > C.classifier_min_overlap for all gt bboxes in 300 non_max_suppression bboxes
-    X = np.array(x_roi)
     # one hot code for bboxes from above => x_roi (X)
     Y1 = np.array(y_class_num)
-    # corresponding labels and corresponding gt bboxes
-    Y2 = np.concatenate([np.array(y_class_regr_label),np.array(y_class_regr_coords)],axis=1)
-
-    return np.expand_dims(X, axis=0), np.expand_dims(Y1, axis=0), np.expand_dims(Y2, axis=0), IoUs
+    Y1 = np.expand_dims(Y1, axis=0)
+    X_list = []
+    Y2_list = []
+    for x_roi, y_class_regr_label, y_class_regr_coords in zip(x_roi_list, y_class_regr_label_list, y_class_regr_coords_list):
+        # bboxes that iou > C.classifier_min_overlap for all gt bboxes in 300 non_max_suppression bboxes
+        X = np.array(x_roi)
+        X = np.expand_dims(X, axis=0)
+        # corresponding labels and corresponding gt bboxes
+        Y2 = np.concatenate([np.array(y_class_regr_label),np.array(y_class_regr_coords)],axis=1)
+        X_list.append(x)
+        Y2_list.append(Y2)
+    Y2 = = np.concatenate(Y2_list,axis=1)
+    Y2 = np.expand_dims(Y2, axis=0)
+    return X_list, Y1, Y2, IoUs
 
 def rpn_to_roi(rpn_layer, regr_layer, C, dim_ordering, use_regr=True, max_boxes=300,overlap_thresh=0.9):
 	"""Convert rpn layer to roi bboxes
@@ -1258,9 +1311,9 @@ def rpn_to_roi(rpn_layer, regr_layer, C, dim_ordering, use_regr=True, max_boxes=
 	# Apply non_max_suppression
 	# Only extract the bboxes. Don't need rpn probs in the later process
 	#result = non_max_suppression_fast(all_boxes, all_probs, overlap_thresh=overlap_thresh, max_boxes=max_boxes)[0]
-	result = non_max_suppression_fast(all_boxes, all_probs, overlap_thresh=overlap_thresh, max_boxes=max_boxes)
+	nms_boxes, nms_probs = non_max_suppression_fast(all_boxes, all_probs, overlap_thresh=overlap_thresh, max_boxes=max_boxes)
 
-	return result
+	return all_boxes, nms_boxes, nms_probs
 
 def get_center(box):
     x1, y1, x2, y2 = box
@@ -1272,25 +1325,26 @@ def computeEpilineStartEnd(pnt, F, x_max):
     pnt_reshape = np.array(pnt).reshape(1,1,2)
     line2 = cv2.computeCorrespondEpilines(pnt_reshape, 1, F)
     line2 = line2.reshape((-1, 3))[0]
-    start = map(int, [0, -(line2[2])/line2[1] ])
-    end = map(int, [x_max, -(line2[2]+line2[0]*x_max)/line2[1] ])
+    start = list(map(int, [0, -(line2[2])/line2[1] ]))
+    end = list(map(int, [x_max, -(line2[2]+line2[0]*x_max)/line2[1] ]))
     return start, end
  
 
 def get_epipolar_line(src, dst, src_pnt, F, x_interval, x_max) :
-    cur_F = F[src][dst]
+    cur_F = F[src,dst]
     pnt = np.array(src_pnt).reshape(1,1,2)
-    line2 = cv2.computeCorrespondEpilines(pt1, 1,cur_F)
+    line2 = cv2.computeCorrespondEpilines(pnt, 1,cur_F)
     line2 = line2.reshape((-1, 3))[0]
     line_list = []
     x = 0
     while x < x_max :
-        x1,y1 = map(int, [x, -(line2[2]+line2[0]*x)/line2[1] ])
-        line_list.append((x1, y1))
+        x1,y1 = list(map(int, [x, -(line2[2]+line2[0]*x)/line2[1] ]))
         x += x_interval
+        if(y1 < 0) : continue
+        line_list.append((x1, y1))
     return line_list 
 
-def get_epipolar_pnt(src1, src2, src1_pnt, src2_pnt, dst, F):
+def get_epipolar_pnt(src1, src2, src1_pnt, src2_pnt, dst, F, x_max):
     F1 = F[src1][dst]
     F2 = F[src2][dst]
     s1, e1 = computeEpilineStartEnd(src1_pnt, F1, x_max)
@@ -1299,28 +1353,48 @@ def get_epipolar_pnt(src1, src2, src1_pnt, src2_pnt, dst, F):
     y_intercept1 = s1[1]
     m2 = (e2[1]-s2[1]) / (e2[0]-s2[0])
     y_intercept2 = s2[1]
+    if(m1 == m2) : return [-1, -1]
 
     x = (y_intercept2-y_intercept1) / (m1-m2)
     y = m1*x + y_intercept1
 
-    return map(int, [x, y])
+    return [int(x), int(y)]
 
-def get_closest_box(cur_cam_pnt): 
+def get_hw(pnt, stride) :
+    return int(pnt[0]/stride), int(pnt[1]/stride)
 
+def calc_dist_pnt_pnts(pnt, pnts) :
+    return (pnt[0] - pnts[:, 0])**2 + (pnt[1] - pnts[:, 1])**2
 
-def epipolar(R_list, C) :
+def get_closest_box(cur_cam_pnt, grid_rows, grid_cols, anchor, stride, all_boxes): 
+    hi, wi = get_hw(cur_cam_pnt, stride)
+    if(hi < 0 or wi < 0 or hi >= grid_rows or wi >= grid_cols):
+        return np.full((4, ), -1)
+    idx = grid_rows * grid_cols * np.arange(anchor) + grid_cols * hi + wi
+    cand_boxes = all_boxes[idx]
+    x1, y1, x2, y2 = cand_boxes[:, 0], cand_boxes[:, 1], cand_boxes[:, 2], cand_boxes[:, 3]
+    cand_centers = np.zeros((len(x1), 2))
+    cand_centers[:, 0], cand_centers[:, 1] = (x1+x2)/2, (y1+y2)/2
+    cand_dist = calc_dist_pnt_pnts(cur_cam_pnt, cand_centers)
+    closest_box = cand_boxes[np.argmin(cand_dist)]
+    return closest_box
+
+def epipolar(R_list, C, all_boxes) :
     #0. sorting
-    prob_cam_box = np.array([])
+    all_boxes = []
+    prob_cam_box = np.empty((0, 6), float)
     for i, R in enumerate(R_list) :
-        box, prob = R
-        cam = np.full((len(box), ), float(i)) 
-        result = np.concatenate((prob, cam, box), axis = 1)
-        prob_cam_box.append(result) 
+        all_box, nms_box, nms_prob = R
+        all_boxes.append(all_box)
+        nms_prob = np.expand_dims(nms_prob, 1)
+        cam = np.full((len(nms_box), 1), float(i)) 
+        result = np.concatenate((nms_prob, cam, nms_box), axis = 1)
+        prob_cam_box = np.append(prob_cam_box, result, axis=0) 
     sort_result =  prob_cam_box[prob_cam_box[:, 0].argsort()]
         
-    result = [list()*C.num_cam]
+    result = [[] for i in range(C.num_cam)]
     for cbp in sort_result : 
-        cur_cam = cbp[1]
+        cur_cam = int(cbp[1])
         box = cbp[2:]
         cur_cam_center = get_center(box)
         #1. get epipolar line in first cam.
@@ -1329,22 +1403,24 @@ def epipolar(R_list, C) :
         for i in range(C.num_cam):
             if(i == cur_cam):
                 continue
-            epipolar_pnts = get_epipolar_line(cur_cam, i, center, C.F, C.epipolar_x_interval, C.cols)
+            epipolar_pnts = get_epipolar_line(cur_cam, i, cur_cam_center, C.F, C.epipolar_x_interval, C.resize_img_cols)
             line_cam = i 
             break
         
         for pnt in epipolar_pnts :
             #2. push paired box.
-            result[cur_cam].append(box)
-            line_cam_box = get_closest_box(pnt)
+            result[cur_cam].append(box.tolist())
+            line_cam_box = get_closest_box(pnt, C.grid_rows, C.grid_cols, C.anchors, C.rpn_stride, all_boxes[line_cam])
             result[line_cam].append(line_cam_box)
             #3. find matched box in other cams and push them.
             for i in range(C.num_cam):
                 if(i == cur_cam or i == line_cam): continue 
-                cur_cam_pnt = get_epipolar_pnt(cur_cam, line_cam, cur_cam_center, pnt, i) 
-                cur_cam_box = get_closest_box(cur_cam_pnt)
+                cur_cam_pnt = get_epipolar_pnt(cur_cam, line_cam, cur_cam_center, pnt, i, C.F, C.resize_img_cols) 
+                cur_cam_box = get_closest_box(cur_cam_pnt, C.grid_rows, C.grid_cols, C.anchors, C.rpn_stride, all_boxes[i])
                 result[i].append(cur_cam_box)
- 
+    return result
+
+#start 
 base_path = '/home/sap/frcnn_keras'
 
 train_path = '/home/sap/frcnn_keras/data/train.txt' 
@@ -1378,6 +1454,15 @@ C.num_rois = num_rois
 
 C.base_net_weights = base_weight_path
 
+F01 = [[2.459393284555216e-07, 1.240428133324114e-05, -0.0019388276339150634], [1.3911908206709622e-05, -3.0469249778638727e-06, -0.00732105994034854], [-0.0017512954375120127, -0.00015617893705877073, 1.0]]
+F10 = [[2.459398251005644e-07, 1.3911909814174001e-05, -0.001751295584798182], [1.2404286166647384e-05, -3.0469314816431586e-06, -0.00015617819543456424], [-0.0019388285855039822, -0.007321060074713767, 1.0]]
+F02 = [[1.5205480713149612e-06, 9.161841415733138e-06, -0.002173851911725283], [-3.9633584206531314e-07, 6.4197842298352806e-06, 0.0015436659310524847], [-0.0008260013004840316, -0.006607662623582755, 1.0]]
+F20 = [[1.520548069654194e-06, -3.9633583414147577e-07, -0.0008260013007094849], [9.161841403010676e-06, 6.419784245600231e-06, -0.006607662618055121], [-0.002173851908850416, 0.0015436659205338987, 1.0]]
+F12 = [[-7.89652807295317e-07, 7.688891158506741e-06, -0.0010792230317055729], [5.9428192631561134e-06, 8.330558193275425e-06, -0.003611465890521748], [-0.0009379108709930972, -0.0037408066830639797, 1.0]]
+F21 = [[-7.89652807897754e-07, 5.942819265995639e-06, -0.0009379108715031892], [7.688891158958637e-06, 8.33055818670516e-06, -0.003740806681812203], [-0.001079223031796278, -0.003611465890419871, 1.0]]
+F00 = F11 = F22 = [[0.0]*3]*3
+F = np.array([[F00, F01, F02], [F10, F11, F12], [F20, F21, F22]])
+C.F = F
 #--------------------------------------------------------#
 # This step will spend some time to load the data        #
 #--------------------------------------------------------#
@@ -1646,27 +1731,29 @@ for epoch_num in range(num_epochs):
             # Get predicted rpn from rpn model [rpn_cls, rpn_regr]
             P_rpn = model_rpn.predict_on_batch(X)
 
-            # R: bboxes (shape=(300,4))
+            # R: (bboxes, prob) (shape=(300,4), shape=(300,) )
             # Convert rpn layer to roi bboxes
             #R = rpn_to_roi(P_rpn[0], P_rpn[1], C, K.image_dim_ordering(), use_regr=True, overlap_thresh=0.7, max_boxes=300)
             R = rpn_to_roi(P_rpn[0], P_rpn[1], C, K.common.image_dim_ordering(), use_regr=True, overlap_thresh=0.7, max_boxes=300)
             R_list = []
             for i in range(num_cam):
                 cam_idx = i*2
-                R = rpn_to_roi(P_rpn[cam_idx], P_rpn[cam_idx+1], C, K.common.image_dim_ordering(), use_regr=True, overlap_thresh=0.7, max_boxes=300)
+                rpn_probs = P_rpn[cam_idx]
+                rpn_boxs = P_rpn[cam_idx+1]
+                R = rpn_to_roi(rpn_probs, rpn_boxs, C, K.common.image_dim_ordering(), use_regr=True, overlap_thresh=0.7, max_boxes=300)
                 R_list.append(R)
-            # grouped_R : list, len(grouped_R) = cam_num, top 300 grouped R where R in each cam is grouped by epipolar geometry. 
-            grouped_R = epipolar(R_list)
+            # grouped_R : [[box1, .... ,box300], [box1, .... ,box300], [box1, .... ,box300]], len(grouped_R) = cam_num, top 300 grouped R where R in each cam is grouped by epipolar geometry. 
+            grouped_R = epipolar(R_list, C)
 
-           
             # note: calc_iou converts from (x1,y1,x2,y2) to (x,y,w,h) format
-            # X2: bboxes that iou > C.classifier_min_overlap for all gt bboxes in 300 non_max_suppression bboxes
+            # X2: [bboxes1, bboxes2, ...,bboxes_num_cam], bboxes that iou > C.classifier_min_overlap for all gt bboxes in 300 non_max_suppression bboxes
             # Y1: one hot code for bboxes from above => x_roi (X)
-            # Y2: corresponding labels and corresponding gt bboxes
-            X2, Y1, Y2, IouS = calc_iou(R, img_data, C, class_mapping)
+            # Y2: corresponding labels and corresponding gt bboxes, #(None, 8 * # of fg classes * num_cam) 
+            #X2, Y1, Y2, IouS = calc_iou(R, img_data, C, class_mapping)
+            X2, Y1, Y2, IouS = calc_iou(grouped_R, img_data, C, class_mapping)
 
             # If X2 is None means there are no matching bboxes
-            if X2 is None:
+            if X2[0] is None:
                 rpn_accuracy_rpn_monitor.append(0)
                 rpn_accuracy_for_epoch.append(0)
                 continue
