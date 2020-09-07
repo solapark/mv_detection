@@ -813,7 +813,7 @@ def get_anchor_gt(all_img_data, C, img_length_calc_function, mode='train'):
     num_cam = C.num_cam
     while True:
         for mv_img_data in all_img_data:
-            x_img_list, y_rpn_regr_list, img_data_aug_list, debug_img_list, num_pos_list = [], [], [], [], []
+            x_img_list, y_rpn_list, img_data_aug_list, debug_img_list, num_pos_list = [], [], [], [], []
             for img_data in mv_img_data: 
                 try:
                     # read in image, and optionally add augmentation
@@ -857,7 +857,7 @@ def get_anchor_gt(all_img_data, C, img_length_calc_function, mode='train'):
                     y_rpn_regr = np.transpose(y_rpn_regr, (0, 2, 3, 1))
                     
                     x_img_list.append(np.copy(x_img))
-                    y_rpn_regr_list.append(np.copy(y_rpn_regr))
+                    y_rpn_list.extend([np.copy(y_rpn_cls), np.copy(y_rpn_regr)])
                     img_data_aug_list.append(img_data_aug)
                     debug_img_list.append(debug_img)
                     num_pos_list.append(num_pos)
@@ -867,7 +867,7 @@ def get_anchor_gt(all_img_data, C, img_length_calc_function, mode='train'):
                     break
 
             if len(x_img_list) != num_cam : continue
-            yield x_img_list, [np.copy(y_rpn_cls), y_rpn_regr_list], img_data_aug_list, debug_img_list, num_pos_list
+            yield x_img_list, y_rpn_list, img_data_aug_list, debug_img_list, num_pos_list
 
 
 lambda_rpn_regr = 1.0
@@ -1438,9 +1438,9 @@ train_path = '/home/sap/frcnn_keras/data/mv_train.txt'
 num_rois = 4 # Number of RoIs to process at once.
 
 # Augmentation flag
-horizontal_flips = True # Augment with horizontal flips in training. 
-vertical_flips = True   # Augment with vertical flips in training. 
-rot_90 = True           # Augment with 90 degree rotations in training. 
+horizontal_flips = False # Augment with horizontal flips in training. 
+vertical_flips = False   # Augment with vertical flips in training. 
+rot_90 = False           # Augment with 90 degree rotations in training. 
 
 output_weight_path = os.path.join(base_path, 'model/model_frcnn_vgg.hdf5')
 
@@ -1508,82 +1508,90 @@ print('Num train samples (images) {}'.format(len(train_imgs)))
 # Get train data generator which generate X, Y, image_data
 data_gen_train = get_anchor_gt(train_imgs, C, get_img_output_length, mode='train')
 
-X, Y, image_data, debug_img, debug_num_pos = next(data_gen_train)
+X_list, Y_list_1d, image_data_list, debug_img_list, debug_num_pos_list = next(data_gen_train)
 
-print('Original image: height=%d width=%d'%(image_data['height'], image_data['width']))
-print('Resized image:  height=%d width=%d C.im_size=%d'%(X.shape[1], X.shape[2], C.im_size))
-print('Feature map size: height=%d width=%d C.rpn_stride=%d'%(Y[0].shape[1], Y[0].shape[2], C.rpn_stride))
-print(X.shape)
-print(str(len(Y))+" includes 'y_rpn_cls' and 'y_rpn_regr'")
-print('Shape of y_rpn_cls {}'.format(Y[0].shape))
-print('Shape of y_rpn_regr {}'.format(Y[1].shape))
-print(image_data)
+Y_list = []
+for i in range(C.num_cam):
+    Y_list.append([Y_list_1d[0], Y_list_1d[1]])
 
-print('Number of positive anchors for this image: %d' % (debug_num_pos))
-if debug_num_pos==0:
-    gt_x1, gt_x2 = image_data['bboxes'][0]['x1']*(X.shape[2]/image_data['height']), image_data['bboxes'][0]['x2']*(X.shape[2]/image_data['height'])
-    gt_y1, gt_y2 = image_data['bboxes'][0]['y1']*(X.shape[1]/image_data['width']), image_data['bboxes'][0]['y2']*(X.shape[1]/image_data['width'])
-    gt_x1, gt_y1, gt_x2, gt_y2 = int(gt_x1), int(gt_y1), int(gt_x2), int(gt_y2)
+for X, Y, image_data, debug_img, debug_num_pos in zip(X_list, Y_list, image_data_list, debug_img_list, debug_num_pos_list) : 
+    print('Original image:', 'height=%d width=%d'%(image_data['height'], image_data['width']))
+    print('Resized image:  height=%d width=%d C.im_size=%d'%(X.shape[1], X.shape[2], C.im_size))
+    print('Feature map size: height=%d width=%d C.rpn_stride=%d'%(Y[0].shape[1], Y[0].shape[2], C.rpn_stride))
+    print(X.shape)
+    print(str(len(Y))+" includes 'y_rpn_cls' and 'y_rpn_regr'")
+    print('Shape of y_rpn_cls {}'.format(Y[0].shape))
+    print('Shape of y_rpn_regr {}'.format(Y[1].shape))
+    print(image_data)
 
-    img = debug_img.copy()
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    color = (0, 255, 0)
-    cv2.putText(img, 'gt bbox', (gt_x1, gt_y1-5), cv2.FONT_HERSHEY_DUPLEX, 0.7, color, 1)
-    cv2.rectangle(img, (gt_x1, gt_y1), (gt_x2, gt_y2), color, 2)
-    cv2.circle(img, (int((gt_x1+gt_x2)/2), int((gt_y1+gt_y2)/2)), 3, color, -1)
+    print('Number of positive anchors for this image: %d' % (debug_num_pos))
 
-    plt.grid()
-    plt.imshow(img)
-    plt.show()
-else:
-    cls = Y[0][0]
-    pos_cls = np.where(cls==1)
-    print(pos_cls)
-    regr = Y[1][0]
-    pos_regr = np.where(regr==1)
-    print(pos_regr)
-    print('y_rpn_cls for possible pos anchor: {}'.format(cls[pos_cls[0][0],pos_cls[1][0],:]))
-    print('y_rpn_regr for positive anchor: {}'.format(regr[pos_regr[0][0],pos_regr[1][0],:]))
+img_list = []
+for X, Y, image_data, debug_img, debug_num_pos in zip(X_list, Y_list, image_data_list, debug_img_list, debug_num_pos_list) : 
+    if debug_num_pos==0:
+        gt_x1, gt_x2 = image_data['bboxes'][0]['x1']*(X.shape[2]/image_data['height']), image_data['bboxes'][0]['x2']*(X.shape[2]/image_data['height'])
+        gt_y1, gt_y2 = image_data['bboxes'][0]['y1']*(X.shape[1]/image_data['width']), image_data['bboxes'][0]['y2']*(X.shape[1]/image_data['width'])
+        gt_x1, gt_y1, gt_x2, gt_y2 = int(gt_x1), int(gt_y1), int(gt_x2), int(gt_y2)
 
-    gt_x1, gt_x2 = image_data['bboxes'][0]['x1']*(X.shape[2]/image_data['width']), image_data['bboxes'][0]['x2']*(X.shape[2]/image_data['width'])
-    gt_y1, gt_y2 = image_data['bboxes'][0]['y1']*(X.shape[1]/image_data['height']), image_data['bboxes'][0]['y2']*(X.shape[1]/image_data['height'])
-    gt_x1, gt_y1, gt_x2, gt_y2 = int(gt_x1), int(gt_y1), int(gt_x2), int(gt_y2)
+        img = debug_img.copy()
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        color = (0, 255, 0)
+        cv2.putText(img, 'gt bbox', (gt_x1, gt_y1-5), cv2.FONT_HERSHEY_DUPLEX, 0.7, color, 1)
+        cv2.rectangle(img, (gt_x1, gt_y1), (gt_x2, gt_y2), color, 2)
+        cv2.circle(img, (int((gt_x1+gt_x2)/2), int((gt_y1+gt_y2)/2)), 3, color, -1)
+    else:
+        cls = Y[0][0]
+        pos_cls = np.where(cls==1)
+        print('pos_cls', pos_cls)
+        regr = Y[1][0]
+        pos_regr = np.where(regr==1)
+        print('pos_regr', pos_regr)
+        print('y_rpn_cls for possible pos anchor: {}'.format(cls[pos_cls[0][0],pos_cls[1][0],:]))
+        print('y_rpn_regr for positive anchor: {}'.format(regr[pos_regr[0][0],pos_regr[1][0],:]))
 
-    img = debug_img.copy()
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    color = (0, 255, 0)
-    #   cv2.putText(img, 'gt bbox', (gt_x1, gt_y1-5), cv2.FONT_HERSHEY_DUPLEX, 0.7, color, 1)
-    cv2.rectangle(img, (gt_x1, gt_y1), (gt_x2, gt_y2), color, 2)
-    cv2.circle(img, (int((gt_x1+gt_x2)/2), int((gt_y1+gt_y2)/2)), 3, color, -1)
+        gt_x1, gt_x2 = image_data['bboxes'][0]['x1']*(X.shape[2]/image_data['width']), image_data['bboxes'][0]['x2']*(X.shape[2]/image_data['width'])
+        gt_y1, gt_y2 = image_data['bboxes'][0]['y1']*(X.shape[1]/image_data['height']), image_data['bboxes'][0]['y2']*(X.shape[1]/image_data['height'])
+        gt_x1, gt_y1, gt_x2, gt_y2 = int(gt_x1), int(gt_y1), int(gt_x2), int(gt_y2)
 
-    # Add text
-    textLabel = 'gt bbox'
-    (retval,baseLine) = cv2.getTextSize(textLabel,cv2.FONT_HERSHEY_COMPLEX,0.5,1)
-    textOrg = (gt_x1, gt_y1+5)
-    cv2.rectangle(img, (textOrg[0] - 5, textOrg[1]+baseLine - 5), (textOrg[0]+retval[0] + 5, textOrg[1]-retval[1] - 5), (0, 0, 0), 2)
-    cv2.rectangle(img, (textOrg[0] - 5,textOrg[1]+baseLine - 5), (textOrg[0]+retval[0] + 5, textOrg[1]-retval[1] - 5), (255, 255, 255), -1)
-    cv2.putText(img, textLabel, textOrg, cv2.FONT_HERSHEY_DUPLEX, 0.5, (0, 0, 0), 1)
+        img = debug_img.copy()
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        color = (0, 255, 0)
+        #   cv2.putText(img, 'gt bbox', (gt_x1, gt_y1-5), cv2.FONT_HERSHEY_DUPLEX, 0.7, color, 1)
+        cv2.rectangle(img, (gt_x1, gt_y1), (gt_x2, gt_y2), color, 2)
+        cv2.circle(img, (int((gt_x1+gt_x2)/2), int((gt_y1+gt_y2)/2)), 3, color, -1)
 
-    # Draw positive anchors according to the y_rpn_regr
-    for i in range(debug_num_pos):
+        # Add text
+        textLabel = 'gt bbox'
+        (retval,baseLine) = cv2.getTextSize(textLabel,cv2.FONT_HERSHEY_COMPLEX,0.5,1)
+        textOrg = (gt_x1, gt_y1+5)
+        cv2.rectangle(img, (textOrg[0] - 5, textOrg[1]+baseLine - 5), (textOrg[0]+retval[0] + 5, textOrg[1]-retval[1] - 5), (0, 0, 0), 2)
+        cv2.rectangle(img, (textOrg[0] - 5,textOrg[1]+baseLine - 5), (textOrg[0]+retval[0] + 5, textOrg[1]-retval[1] - 5), (255, 255, 255), -1)
+        cv2.putText(img, textLabel, textOrg, cv2.FONT_HERSHEY_DUPLEX, 0.5, (0, 0, 0), 1)
 
-        color = (100+i*(155/4), 0, 100+i*(155/4))
+        # Draw positive anchors according to the y_rpn_regr
+        for i in range(debug_num_pos):
 
-        idx = pos_regr[2][i*4]/4
-        anchor_size = C.anchor_box_scales[int(idx/3)]
-        anchor_ratio = C.anchor_box_ratios[2-int((idx+1)%3)]
+            color = (100+i*(155/4), 0, 100+i*(155/4))
 
-        center = (pos_regr[1][i*4]*C.rpn_stride, pos_regr[0][i*4]*C.rpn_stride)
-        print('Center position of positive anchor: ', center)
-        cv2.circle(img, center, 3, color, -1)
-        anc_w, anc_h = anchor_size*anchor_ratio[0], anchor_size*anchor_ratio[1]
-        cv2.rectangle(img, (center[0]-int(anc_w/2), center[1]-int(anc_h/2)), (center[0]+int(anc_w/2), center[1]+int(anc_h/2)), color, 2)
+            idx = pos_regr[2][i*4]/4
+            anchor_size = C.anchor_box_scales[int(idx/3)]
+            anchor_ratio = C.anchor_box_ratios[2-int((idx+1)%3)]
+
+            center = (pos_regr[1][i*4]*C.rpn_stride, pos_regr[0][i*4]*C.rpn_stride)
+            print('Center position of positive anchor: ', center)
+            cv2.circle(img, center, 3, color, -1)
+            anc_w, anc_h = anchor_size*anchor_ratio[0], anchor_size*anchor_ratio[1]
+            cv2.rectangle(img, (center[0]-int(anc_w/2), center[1]-int(anc_h/2)), (center[0]+int(anc_w/2), center[1]+int(anc_h/2)), color, 2)
 #         cv2.putText(img, 'pos anchor bbox '+str(i+1), (center[0]-int(anc_w/2), center[1]-int(anc_h/2)-5), cv2.FONT_HERSHEY_DUPLEX, 0.5, color, 1)
+    img_list.append(img)
 
 print('Green bboxes is ground-truth bbox. Others are positive anchors')
 plt.figure(figsize=(8,8))
-plt.grid()
-plt.imshow(img)
+for i, img in enumerate(img_list) : 
+    coord = int('1'+str(C.num_cam)+str(i+1))
+    plt.grid()
+    plt.subplot(coord)
+    plt.imshow(img)
 plt.show()
 
 input_shape_img = (None, None, 3)
@@ -1610,7 +1618,7 @@ model_classifier = Model([img_input, roi_input], classifier)
 model_all = Model([img_input, roi_input], rpn[:2] + classifier)
 '''
 
-num_cam = 3
+num_cam = C.num_cam
 img_input = []
 roi_input = []
 for i in range(num_cam) : 
@@ -1689,7 +1697,7 @@ rpn_loss = []
 for i in range(num_cam) : 
     rpn_loss.extend([rpn_loss_cls(num_anchors), rpn_loss_regr(num_anchors)])
 model_rpn.compile(optimizer=optimizer, loss=rpn_loss)
-model_classifier.compile(optimizer=optimizer_classifier, loss=[class_loss_cls, class_loss_regr(len(classes_count)-1)], metrics={'dense_class_{}'.format(len(classes_count)): 'accuracy'})
+model_classifier.compile(optimizer=optimizer_classifier, loss=[class_loss_cls, class_loss_regr(len(classes_count)-1, num_cam)], metrics={'dense_class_{}'.format(len(classes_count)): 'accuracy'})
 model_all.compile(optimizer='sgd', loss='mae')
 
 # Training setting
