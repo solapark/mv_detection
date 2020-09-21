@@ -1084,28 +1084,32 @@ def apply_regr(x, y, w, h, tx, ty, tw, th):
         print(e)
         return x, y, w, h
 
-def calc_iou(Grouped_R, img_data, C, class_mapping):
+def calc_iou(Grouped_R, img_datas, C, class_mapping):
     """Converts from (x1,y1,x2,y2) to (x,y,w,h) format
 
     Args:
         R: bboxes
     """
-    bboxes_list = img_data['bboxes']
-    (width, height) = (img_data['width'], img_data['height'])
+    bboxes_list = [img_data['bboxes'] for img_data in img_datas] #[[cam1_box1, cam1_box2, cam1_box3, ...], [cam2_box1, cam2_box2, cam2_box3, ...], [cam3_box1, cam3_box2, cam3_box3, ....]]
+    len_bboxes = len(bboxes_list[0])
+    #(width, height) = (img_data['width'], img_data['height'])
+    width_height_list = [(img_data['width'], img_data['height']) for img_data in img_datas]
     # get image dimensions for resizing
-    (resized_width, resized_height) = get_new_img_size(width, height, C.im_size)
+    resized_width_height_list = [get_new_img_size(width_height[0], width_height[1],C.im_size) for width_height in width_height_list]
 
-    len_bboxes = len(bboxes[0])
     gta_list = [np.zeros((len_bboxes, 4))]*C.num_cam
 
-    for bboxes, gta in zip(bboxes_list, gta_list) : 
-        for bbox_num, bbox in enumerate(bboxes):
+    for i in range(len_bboxes):
+        for j in range(C.num_cam) : 
+            bbox = bboxes_list[j][i]
+            width, height = width_height_list[j]
+            resized_width, resized_height = resized_width_height_list[j]
             # get the GT box coordinates, and resize to account for image resizing
             # gta[bbox_num, 0] = (40 * (600 / 800)) / 16 = int(round(1.875)) = 2 (x in feature map)
-            gta[bbox_num, 0] = int(round(bbox['x1'] * (resized_width / float(width))/C.rpn_stride))
-            gta[bbox_num, 1] = int(round(bbox['x2'] * (resized_width / float(width))/C.rpn_stride))
-            gta[bbox_num, 2] = int(round(bbox['y1'] * (resized_height / float(height))/C.rpn_stride))
-            gta[bbox_num, 3] = int(round(bbox['y2'] * (resized_height / float(height))/C.rpn_stride))
+            gta_list[j][i, 0] = int(round(bbox['x1'] * (resized_width / float(width))/C.rpn_stride))
+            gta_list[j][i, 1] = int(round(bbox['x2'] * (resized_width / float(width))/C.rpn_stride))
+            gta_list[j][i, 2] = int(round(bbox['y1'] * (resized_height / float(height))/C.rpn_stride))
+            gta_list[j][i, 3] = int(round(bbox['y2'] * (resized_height / float(height))/C.rpn_stride))
 
     x_roi_list = [[]]*C.num_cam
     y_class_num = []
@@ -1388,7 +1392,7 @@ def get_closest_box(cur_cam_pnt, grid_rows, grid_cols, anchor, stride, all_boxes
     closest_box = cand_boxes[np.argmin(cand_dist)]
     return closest_box
 
-def epipolar(R_list, C, all_boxes) :
+def epipolar(R_list, C) :
     #0. sorting
     all_boxes = []
     prob_cam_box = np.empty((0, 6), float)
@@ -1403,6 +1407,7 @@ def epipolar(R_list, C, all_boxes) :
         
     result = [[] for i in range(C.num_cam)]
     for cbp in sort_result : 
+        if(len(result[0]) > 300) : break
         cur_cam = int(cbp[1])
         box = cbp[2:]
         cur_cam_center = get_center(box)
@@ -1508,6 +1513,7 @@ print('Num train samples (images) {}'.format(len(train_imgs)))
 # Get train data generator which generate X, Y, image_data
 data_gen_train = get_anchor_gt(train_imgs, C, get_img_output_length, mode='train')
 
+'''
 X_list, Y_list_1d, image_data_list, debug_img_list, debug_num_pos_list = next(data_gen_train)
 
 Y_list = []
@@ -1593,6 +1599,7 @@ for i, img in enumerate(img_list) :
     plt.subplot(coord)
     plt.imshow(img)
 plt.show()
+'''
 
 input_shape_img = (None, None, 3)
 
@@ -1750,8 +1757,7 @@ for epoch_num in range(num_epochs):
 
             # R: (bboxes, prob) (shape=(300,4), shape=(300,) )
             # Convert rpn layer to roi bboxes
-            #R = rpn_to_roi(P_rpn[0], P_rpn[1], C, K.image_dim_ordering(), use_regr=True, overlap_thresh=0.7, max_boxes=300)
-            R = rpn_to_roi(P_rpn[0], P_rpn[1], C, K.common.image_dim_ordering(), use_regr=True, overlap_thresh=0.7, max_boxes=300)
+            #R_list = [ (all_boxes, nms_boxes, nms_probs), (all_boxes, nms_boxes, nms_probs), (all_boxes, nms_boxes, nms_probs), ...], len(R_list) = num_cam
             R_list = []
             for i in range(num_cam):
                 cam_idx = i*2
