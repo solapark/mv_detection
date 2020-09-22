@@ -100,11 +100,12 @@ class Config:
         self.epipolar_x_interval = 3
         self.num_cam = 3
 
-        self.resize_img_cols= self.im_size #600
-        self.resize_img_rows= self.raw_img_rows * self.resize_img_cols / self.raw_img_cols #337
+        self.resize_img_rows= self.im_size #600
+        self.resize_ratio = self.resize_img_rows / self.raw_img_rows
+        self.resize_img_cols= self.raw_img_cols * self.resize_ratio #1066
         self.anchors = len(self.anchor_box_scales) * len(self.anchor_box_ratios) #9
-        self.grid_rows = int(self.resize_img_rows/self.rpn_stride)
-        self.grid_cols = int(self.resize_img_cols/self.rpn_stride)
+        self.grid_rows = self.resize_img_rows//self.rpn_stride
+        self.grid_cols = self.resize_img_cols//self.rpn_stride
         self.whole_anchors = self.grid_rows * self.grid_cols * self.anchors
  
 
@@ -1326,7 +1327,7 @@ def rpn_to_roi(rpn_layer, regr_layer, C, dim_ordering, use_regr=True, max_boxes=
     #result = non_max_suppression_fast(all_boxes, all_probs, overlap_thresh=overlap_thresh, max_boxes=max_boxes)[0]
     nms_boxes, nms_probs = non_max_suppression_fast(all_boxes, all_probs, overlap_thresh=overlap_thresh, max_boxes=max_boxes)
 
-    return all_boxes, nms_boxes, nms_probs
+    return A, nms_boxes, nms_probs
 
 def get_center(box):
     x1, y1, x2, y2 = box
@@ -1334,65 +1335,78 @@ def get_center(box):
     cy = (y1+y2)/2
     return (cx, cy)
 
-def computeEpilineStartEnd(pnt, F, x_max):
+def get_epipolar_param(pnt, F, stride):
     pnt_reshape = np.array(pnt).reshape(1,1,2)
     line2 = cv2.computeCorrespondEpilines(pnt_reshape, 1, F)
     line2 = line2.reshape((-1, 3))[0]
-    start = list(map(int, [0, -(line2[2])/line2[1] ]))
-    end = list(map(int, [x_max, -(line2[2]+line2[0]*x_max)/line2[1] ]))
-    return start, end
- 
+    slope = -line2[0]/line2[1]
+    intercept = -line2[2]/line2[1]
+    new_intercept = intercept/stride
+    return slope, new_intercept
 
-def get_epipolar_line(src, dst, src_pnt, F, x_interval, x_max) :
+def get_epipolar_line(src, dst, src_pnt, F, grid_rows, grid_cols, stride) :
     cur_F = F[src,dst]
-    pnt = np.array(src_pnt).reshape(1,1,2)
-    line2 = cv2.computeCorrespondEpilines(pnt, 1,cur_F)
-    line2 = line2.reshape((-1, 3))[0]
+    slope, intercept = get_epipolar_param(src_pnt, cur_F, stride)
     line_list = []
-    x = 0
-    while x < x_max :
-        x1,y1 = list(map(int, [x, -(line2[2]+line2[0]*x)/line2[1] ]))
-        x += x_interval
-        if(y1 < 0) : continue
-        line_list.append((x1, y1))
+    x1 = y1 = 0.5
+    while x1 < grid_cols and y1 < grid_rows:
+        y1 = slope*x1 + intercept
+        if(y1 >= 0) : line_list.append((x1, y1))
+        x1 += 1
     return line_list 
 
-def get_epipolar_pnt(src1, src2, src1_pnt, src2_pnt, dst, F, x_max):
+def get_epipolar_pnt(src1, src2, src1_pnt, src2_pnt, dst, F, stride):
     F1 = F[src1][dst]
     F2 = F[src2][dst]
-    s1, e1 = computeEpilineStartEnd(src1_pnt, F1, x_max)
-    s2, e2 = computeEpilineStartEnd(src2_pnt, F2, x_max)
-    m1 = (e1[1]-s1[1]) / (e1[0]-s1[0])
-    y_intercept1 = s1[1]
-    m2 = (e2[1]-s2[1]) / (e2[0]-s2[0])
-    y_intercept2 = s2[1]
-    if(m1 == m2) : return [-1, -1]
+    slope1, intercept1 = get_epipolar_param(src1_pnt, F1, stride)
+    slope2, intercept2 = get_epipolar_param(src2_pnt, F2, stride)
+    if(slope1 == slope2) : return [-1, -1]
+    x = (intercept2-intercept1) / (slope1-slope2)
+    y = slope1*x + intercept1
+    return [x, y]
 
-    x = (y_intercept2-y_intercept1) / (m1-m2)
-    y = m1*x + y_intercept1
-
-    return [int(x), int(y)]
-
-def get_hw(pnt, stride) :
-    return int(pnt[0]/stride), int(pnt[1]/stride)
+def get_xy_idx(pnt) :
+    x = int(pnt[0])
+    y = int(pnt[1])
+    return x, y 
 
 def calc_dist_pnt_pnts(pnt, pnts) :
     return (pnt[0] - pnts[:, 0])**2 + (pnt[1] - pnts[:, 1])**2
 
-def get_closest_box(cur_cam_pnt, grid_rows, grid_cols, anchor, stride, all_boxes): 
-    hi, wi = get_hw(cur_cam_pnt, stride)
-    if(hi < 0 or wi < 0 or hi >= grid_rows or wi >= grid_cols):
+def get_closest_box(cur_cam_pnt, grid_h, grid_w, all_boxes): 
+    #all_box = #(4, grid_H, grid_W, anchor=9)
+    xi, yi = get_xy_idx(cur_cam_pnt)
+    if(xi < 0 or yi < 0 or yi >= grid_h or xi >= grid_w):
         return np.full((4, ), -1)
-    idx = grid_rows * grid_cols * np.arange(anchor) + grid_cols * hi + wi
-    cand_boxes = all_boxes[idx]
+    cand_boxes = all_boxes[:, yi, xi, :] #(4, 9)
+    cand_boxes = np.transpose(cand_boxes, (1, 0)) #(9, 4)
     x1, y1, x2, y2 = cand_boxes[:, 0], cand_boxes[:, 1], cand_boxes[:, 2], cand_boxes[:, 3]
-    cand_centers = np.zeros((len(x1), 2))
+    idxs = np.where((x1 - x2 >= 0) | (y1 - y2 >= 0))
+    cand_boxes = np.delete(cand_boxes, idxs, 0)
+    if not cand_boxes.any() : 
+        return np.full((4, ), -1)
+    x1, y1, x2, y2 = cand_boxes[:, 0], cand_boxes[:, 1], cand_boxes[:, 2], cand_boxes[:, 3]
+    cand_centers = np.zeros((len(cand_boxes), 2))
     cand_centers[:, 0], cand_centers[:, 1] = (x1+x2)/2, (y1+y2)/2
     cand_dist = calc_dist_pnt_pnts(cur_cam_pnt, cand_centers)
     closest_box = cand_boxes[np.argmin(cand_dist)]
     return closest_box
 
-def epipolar(R_list, C) :
+def epipolar(R_list, C, debug_img) :
+    """Generate matched boxes based on epipolar having top nms pob in one camera.
+    Args: (num_anchors = 9)
+        R_list: [(all_box, nms_box, nms_prob)]*num_cam,
+                #all_box = #(4, grid_H, grid_W, anchor=9)
+                #nms_box = #(300, 4)
+                #nms_pob = #(300,)
+        C: config
+        debug_img: [debug_img]*num_cam
+
+    Returns:
+        result: 
+            
+    """
+
     #0. sorting
     all_boxes = []
     prob_cam_box = np.empty((0, 6), float)
@@ -1417,27 +1431,62 @@ def epipolar(R_list, C) :
         for i in range(C.num_cam):
             if(i == cur_cam):
                 continue
-            epipolar_pnts = get_epipolar_line(cur_cam, i, cur_cam_center, C.F, C.epipolar_x_interval, C.resize_img_cols)
+            epipolar_pnts = get_epipolar_line(cur_cam, i, cur_cam_center, C.F, C.grid_rows, C.grid_cols, C.rpn_stride)
+
+            src_img = debug_img[cur_cam].copy()
+            dst_img = debug_img[i].copy()
+            magnified_cur_cam_center =( int(cur_cam_center[0]*C.rpn_stride), int(cur_cam_center[1]*C.rpn_stride))
+            cv2.circle(src_img, magnified_cur_cam_center, 3, (0, 255, 0), -1)
+            for pnt in epipolar_pnts:
+                cv2.circle(dst_img, (int(pnt[0]*C.rpn_stride), int(pnt[1]*C.rpn_stride)), 3, (0, 255, 0), -1)
+            print('src', cur_cam, 'dst', i, 'src_center in raw img', magnified_cur_cam_center)
+            cv2.imshow('src', src_img)
+            cv2.imshow('dst', dst_img)
+            cv2.waitKey()
+            
             line_cam = i 
+            print('epipolar_pnts', epipolar_pnts)
             break
         
         for pnt in epipolar_pnts :
             #2. push paired box.
             result[cur_cam].append(box.tolist())
-            line_cam_box = get_closest_box(pnt, C.grid_rows, C.grid_cols, C.anchors, C.rpn_stride, all_boxes[line_cam])
+            line_cam_box = get_closest_box(pnt, C.grid_rows, C.grid_cols, all_boxes[line_cam])
             result[line_cam].append(line_cam_box)
-            #3. find matched box in other cams and push them.
+
+            x1, y1, x2, y2 = np.int32(line_cam_box)*C.rpn_stride
+            pnt_x = int(pnt[0]*C.rpn_stride)
+            pnt_y = int(pnt[1]*C.rpn_stride)
+            print('second_cam pnt', (pnt_x, pnt_y), 'box', x1, y1, x2, y2)
+            dst_img = debug_img[line_cam].copy()
+            cv2.circle(dst_img, (pnt_x, pnt_y), 3, (255, 0, 0), -1)
+            cv2.rectangle(dst_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.imshow('second_cam', dst_img)
+            cv2.waitKey()
+
+             #3. find matched box in other cams and push them.
             for i in range(C.num_cam):
                 if(i == cur_cam or i == line_cam): continue 
                 cur_cam_pnt = get_epipolar_pnt(cur_cam, line_cam, cur_cam_center, pnt, i, C.F, C.resize_img_cols) 
-                cur_cam_box = get_closest_box(cur_cam_pnt, C.grid_rows, C.grid_cols, C.anchors, C.rpn_stride, all_boxes[i])
+                cur_cam_box = get_closest_box(cur_cam_pnt, C.grid_rows, C.grid_cols, all_boxes[i])
                 result[i].append(cur_cam_box)
+
+                x1, y1, x2, y2 = np.int32(cur_cam_box)*C.rpn_stride
+                pnt_x = int(cur_cam_pnt[0]*C.rpn_stride)
+                pnt_y = int(cur_cam_pnt[1]*C.rpn_stride)
+                print('third_cam pnt', (pnt_x, pnt_y), 'box', x1, y1, x2, y2)
+                dst_img = debug_img[i].copy()
+                cv2.circle(dst_img, (pnt_x, pnt_y), 3, (255, 0, 0), -1)
+                cv2.rectangle(dst_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.imshow('third_cam', dst_img)
+                cv2.waitKey()
+
     return result
 
 #start 
 base_path = '/home/sap/frcnn_keras'
 
-train_path = '/home/sap/frcnn_keras/data/mv_train.txt' 
+train_path = '/home/sap/frcnn_keras/data/mv_train_tmp.txt' 
 #train_path = '/home/sap/frcnn_keras/data/train_tmp.txt' 
 
 num_rois = 4 # Number of RoIs to process at once.
@@ -1563,7 +1612,7 @@ for X, Y, image_data, debug_img, debug_num_pos in zip(X_list, Y_list, image_data
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         color = (0, 255, 0)
         #   cv2.putText(img, 'gt bbox', (gt_x1, gt_y1-5), cv2.FONT_HERSHEY_DUPLEX, 0.7, color, 1)
-        cv2.rectangle(img, (gt_x1, gt_y1), (gt_x2, gt_y2), color, 2)
+        cv2.rectangle(imgbox, (gt_x1, gt_y1), (gt_x2, gt_y2), color, 2)
         cv2.circle(img, (int((gt_x1+gt_x2)/2), int((gt_y1+gt_y2)/2)), 3, color, -1)
 
         # Add text
@@ -1766,7 +1815,25 @@ for epoch_num in range(num_epochs):
                 R = rpn_to_roi(rpn_probs, rpn_boxs, C, K.common.image_dim_ordering(), use_regr=True, overlap_thresh=0.7, max_boxes=300)
                 R_list.append(R)
             # grouped_R : [[box1, .... ,box300], [box1, .... ,box300], [box1, .... ,box300]], len(grouped_R) = cam_num, top 300 grouped R where R in each cam is grouped by epipolar geometry. 
-            grouped_R = epipolar(R_list, C)
+            grouped_R = epipolar(R_list, C, debug_img)
+            color = (0, 255, 0)
+            for i in range(len(R_list[0])) :
+                img_list = [] 
+                for j in range(len(debug_img)) :
+                    img = debug_img[j].copy()
+                    x1, y1, x2, y2 = list(map(int, grouped_R[j][i]))
+                    if x1 != -1 : 
+                        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+                    img_list.append(img)
+
+                plt.figure(figsize=(8,8))
+                for i, img in enumerate(img_list) : 
+                    coord = int('1'+str(C.num_cam)+str(i+1))
+                    plt.grid()
+                    plt.subplot(coord)
+                    plt.imshow(img)
+                plt.show()
+
 
             # note: calc_iou converts from (x1,y1,x2,y2) to (x,y,w,h) format
             # X2: [bboxes1, bboxes2, ...,bboxes_num_cam], bboxes that iou > C.classifier_min_overlap for all gt bboxes in 300 non_max_suppression bboxes
