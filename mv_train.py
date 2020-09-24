@@ -1090,7 +1090,8 @@ def calc_iou(Grouped_R, img_datas, C, class_mapping):
     """Converts from (x1,y1,x2,y2) to (x,y,w,h) format
 
     Args:
-        R: bboxes
+        Grouped_R: [bboxes, bboxes, ...], len(Grouped_R) = num_cam
+            bboxes : #(300, 4)  
     """
     bboxes_list = [img_data['bboxes'] for img_data in img_datas] #[[cam1_box1, cam1_box2, cam1_box3, ...], [cam2_box1, cam2_box2, cam2_box3, ...], [cam3_box1, cam3_box2, cam3_box3, ....]]
     len_bboxes = len(bboxes_list[0])
@@ -1119,8 +1120,8 @@ def calc_iou(Grouped_R, img_datas, C, class_mapping):
     y_class_regr_label = [[]]*C.num_cam
     IoUs = [] # for debugging only
 
-    # R.shape[0]: number of bboxes (=300 from non_max_suppression)
-    for ix in range(R.shape[0]):
+    # Grouped_R[0].shape: number of bboxes (=300 from non_max_suppression)
+    for ix in range(Grouped_R[0].shape[0]):
         x1s, y1s, x2s, y2s = [], [], [], []
         for R in grouped_R :
             (x1, y1, x2, y2) = R[ix, :]
@@ -1131,7 +1132,7 @@ def calc_iou(Grouped_R, img_datas, C, class_mapping):
         best_iou = 0.0
         best_bbox = -1
         # Iterate through all the ground-truth bboxes to calculate the iou
-        for bbox_num in range(len(bboxes)):
+        for bbox_num in range(len_bboxes):
             #curr_iou = iou([gta[bbox_num, 0], gta[bbox_num, 2], gta[bbox_num, 1], gta[bbox_num, 3]], [x1, y1, x2, y2])
             curr_iou = 0
             #num_valid_cam = 0
@@ -1164,7 +1165,7 @@ def calc_iou(Grouped_R, img_datas, C, class_mapping):
                 # hard negative example
                 cls_name = 'bg'
             elif C.classifier_max_overlap <= best_iou:
-                cls_name = bboxes[best_bbox]['class']
+                cls_name = bboxes_list[0][best_bbox]['class']
                 txs, tys, tws, ths = [], [], [], []
                 for x1, y1, w, h, gta in zip(x1s, y1s, ws, hs, gta_list) : 
                     cxg = (gta[best_bbox, 0] + gta[best_bbox, 1]) / 2.0
@@ -1208,7 +1209,7 @@ def calc_iou(Grouped_R, img_datas, C, class_mapping):
                 y_class_regr_label.append(copy.deepcopy(labels))
 
     if len(x_roi_list[0]) == 0:
-        return [[None, None, None, None]]*C.num_cam
+        return [None]*C.num_cam, None, [None]*C.num_cam, None
 
     # one hot code for bboxes from above => x_roi (X)
     Y1 = np.array(y_class_num)
@@ -1405,8 +1406,8 @@ def epipolar(R_list, C, debug_img) :
         debug_img: [debug_img]*num_cam
 
     Returns:
-        result: 
-            
+        result: [matched_box_list_in_cam0,  matched_box_list_in_cam1, ...]
+            matched_box_list_in_cam0 : #(n, 4), n is the number of boxes
     """
 
     #0. sorting
@@ -1488,13 +1489,13 @@ def epipolar(R_list, C, debug_img) :
                 cv2.imshow('third_cam', dst_img)
                 cv2.waitKey()
                 '''
-
+    result = [np.array(r) for r in result]
     return result
 
 #start 
 base_path = '/home/sap/frcnn_keras'
 
-train_path = '/home/sap/frcnn_keras/data/mv_train_tmp.txt' 
+train_path = '/home/sap/frcnn_keras/data/mv_train.txt' 
 #train_path = '/home/sap/frcnn_keras/data/train_tmp.txt' 
 
 num_rois = 4 # Number of RoIs to process at once.
@@ -1824,13 +1825,12 @@ for epoch_num in range(num_epochs):
                 R_list.append(R)
             # grouped_R : [[box1, .... ,box300], [box1, .... ,box300], [box1, .... ,box300]], len(grouped_R) = cam_num, top 300 grouped R where R in each cam is grouped by epipolar geometry. 
             grouped_R = epipolar(R_list, C, debug_img)
-            '''
             color = (0, 255, 0)
             for i in range(len(R_list[0])) :
                 img_list = [] 
                 for j in range(len(debug_img)) :
                     img = debug_img[j].copy()
-                    x1, y1, x2, y2 = list(map(int, grouped_R[j][i]))
+                    x1, y1, x2, y2 = np.int32(grouped_R[j][i]*C.rpn_stride)
                     if x1 != -1 : 
                         cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
                     img_list.append(img)
@@ -1842,7 +1842,6 @@ for epoch_num in range(num_epochs):
                     plt.subplot(coord)
                     plt.imshow(img)
                 plt.show()
-            '''
 
 
             # note: calc_iou converts from (x1,y1,x2,y2) to (x,y,w,h) format
