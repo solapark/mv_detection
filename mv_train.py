@@ -33,6 +33,7 @@ from keras.utils import generic_utils
 from keras.engine import Layer, InputSpec
 from keras import initializers, regularizers
 from keras.utils import multi_gpu_model
+from keras.callbacks import TensorBoard
 
 #os.environ['CUDA_VISIBLE_DEVICES']='0,1,3'
 os.environ['CUDA_VISIBLE_DEVICES']='3'
@@ -259,19 +260,16 @@ class RoiPoolingConv(Layer):
             w = rois[0, roi_idx, 2]
             h = rois[0, roi_idx, 3]
 
-            if(x == -1) :
-                rs = tf.zeros([self.pool_size, self.pool_size], tf.int32)
-            else : 
-                x = K.cast(x, 'int32')
-                y = K.cast(y, 'int32')
-                w = K.cast(w, 'int32')
-                h = K.cast(h, 'int32')
-
-                # Resized roi of the image to pooling size (7x7)
-                rs = tf.image.resize_images(img[:, y:y+h, x:x+w, :], (self.pool_size, self.pool_size))
-                #rs = tf.image.resize(img[:, y:y+h, x:x+w, :], (self.pool_size, self.pool_size))
+            x = K.cast(x, 'int32')
+            y = K.cast(y, 'int32')
+            w = K.cast(w, 'int32')
+            h = K.cast(h, 'int32')
+            
+            # Resized roi of the image to pooling size (7x7)
+            roi = K.switch(K.equal(x, -1), tf.zeros([self.pool_size, self.pool_size, self.nb_channels], tf.float32), img[0, y:y+h, x:x+w, :])
+            rs = tf.image.resize_images(roi, (self.pool_size, self.pool_size))
+            rs = K.reshape(rs, (1, self.pool_size, self.pool_size, self.nb_channels))
             outputs.append(rs)
-                
 
         final_output = K.concatenate(outputs, axis=0)
         #final_output = tf.keras.layers.Concatenate(axis=0)(outputs) 
@@ -445,7 +443,7 @@ class ViewPooling(Layer):
 
     def call(self, x):
         assert(len(x) == self.num_cam)
-        return K.concatenate(x, axis=1)
+        return K.concatenate(x, axis=4)
 
 #def classifier_layer(base_layers, input_rois, num_rois, nb_classes = 4):
 def classifier_layer(base_layers, input_rois, num_rois, num_cam, nb_classes = 4):
@@ -472,7 +470,7 @@ def classifier_layer(base_layers, input_rois, num_rois, num_cam, nb_classes = 4)
     out_roi_pools = []
     for i in range(num_cam):
         out_roi_pools.append(RoiPoolingConv(pooling_regions, num_rois)([base_layers[i], input_rois[i]])) #(1, 4, 7, 7, 512)
-    out_roi_pool = ViewPooling(num_cam)(out_roi_pools)
+    out_roi_pool = ViewPooling(num_cam)(out_roi_pools) #(1, 4, 7, 7, 512*num_cam)
 
     # Flatten the convlutional layer and connected to 2 FC and 2 dropout
     out = TimeDistributed(Flatten(name='flatten'))(out_roi_pool)
@@ -1100,7 +1098,7 @@ def calc_iou(Grouped_R, img_datas, C, class_mapping):
     # get image dimensions for resizing
     resized_width_height_list = [get_new_img_size(width_height[0], width_height[1],C.im_size) for width_height in width_height_list]
 
-    gta_list = [np.zeros((len_bboxes, 4))]*C.num_cam
+    gta_list = [np.zeros((len_bboxes, 4)) for _ in range(C.num_cam)]
 
     for i in range(len_bboxes):
         for j in range(C.num_cam) : 
@@ -1114,13 +1112,13 @@ def calc_iou(Grouped_R, img_datas, C, class_mapping):
             gta_list[j][i, 2] = int(round(bbox['y1'] * (resized_height / float(height))/C.rpn_stride))
             gta_list[j][i, 3] = int(round(bbox['y2'] * (resized_height / float(height))/C.rpn_stride))
 
-    x_roi_list = [[]]*C.num_cam
+    x_roi_list = [[] for _ in range(C.num_cam)]
     y_class_num = []
-    y_class_regr_coords = [[]]*C.num_cam
-    y_class_regr_label = [[]]*C.num_cam
+    y_class_regr_label_coords = []
+    #y_class_regr_label = [[] for _ in range(C.num_cam)]
     IoUs = [] # for debugging only
 
-    # Grouped_R[0].shape: number of bboxes (=300 from non_max_suppression)
+    # Grouped_R[0].shape[0]: number of bboxes (=300 from non_max_suppression)
     for ix in range(Grouped_R[0].shape[0]):
         x1s, y1s, x2s, y2s = [], [], [], []
         for R in grouped_R :
@@ -1133,16 +1131,12 @@ def calc_iou(Grouped_R, img_datas, C, class_mapping):
         best_bbox = -1
         # Iterate through all the ground-truth bboxes to calculate the iou
         for bbox_num in range(len_bboxes):
-            #curr_iou = iou([gta[bbox_num, 0], gta[bbox_num, 2], gta[bbox_num, 1], gta[bbox_num, 3]], [x1, y1, x2, y2])
             curr_iou = 0
-            #num_valid_cam = 0
             for x1, y1, x2, y2, gta in zip(x1s, y1s, x2s, y2s, gta_list) : 
                 curr_iou_in_one_cam = iou([gta[bbox_num, 0], gta[bbox_num, 2], gta[bbox_num, 1], gta[bbox_num, 3]], [x1, y1, x2, y2])
                 if(curr_iou_in_one_cam > 0):
-                    #num_valid_cam += 1
                     curr_iou += curr_iou_in_one_cam
-            #curr_iou /= num_valid_cam
-            curr_iou /= num_cam
+            curr_iou /= C.num_cam
 
             # Find out the corresponding ground-truth bbox_num with larget iou
             if curr_iou > best_iou:
@@ -1190,42 +1184,34 @@ def calc_iou(Grouped_R, img_datas, C, class_mapping):
         class_label = len(class_mapping) * [0]
         class_label[class_num] = 1
         y_class_num.append(copy.deepcopy(class_label))
-        coords_list, labels_list = [], []
-        coords = [0] * 4 * (len(class_mapping) - 1)
-        labels = [0] * 4 * (len(class_mapping) - 1)
-        coords_list = [coords]*num_cam
-        labels_list = [labels]*num_cam
-        if cls_name != 'bg':
-            label_pos = 4 * class_num
-            sx, sy, sw, sh = C.classifier_regr_std
-            for coords, labels, tx, ty, tw, th, y_class_regr_coords, y_class_regr_label in zip(coords_list, labels_list, txs, tys, tws, ths, y_class_regr_coords_list, y_class_regr_label_list) : 
+        labels_coords_list = []
+        label_pos = 4 * class_num
+        sx, sy, sw, sh = C.classifier_regr_std
+        for i in range(C.num_cam) : 
+            coords = [0] * 4*(len(class_mapping)-1)
+            labels = [0] * 4*(len(class_mapping)-1)
+            if cls_name != 'bg':
+                tx, ty, tw, th = txs[i], tys[i], tws[i], ths[i]
                 coords[label_pos:4+label_pos] = [sx*tx, sy*ty, sw*tw, sh*th]
                 labels[label_pos:4+label_pos] = [1, 1, 1, 1]
-                y_class_regr_coords.append(copy.deepcopy(coords))
-                y_class_regr_label.append(copy.deepcopy(labels))
-        else:
-            for coords, labels, y_class_regr_coords, y_class_regr_label in zip(coords_list, labels_list, y_class_regr_coords_list, y_class_regr_label_list) : 
-                y_class_regr_coords.append(copy.deepcopy(coords))
-                y_class_regr_label.append(copy.deepcopy(labels))
+            labels_coords = np.concatenate((labels, coords))
+            labels_coords_list.append(labels_coords)
+        labels_coords_in_all_cam = np.concatenate(labels_coords_list)
+        y_class_regr_label_coords.append(labels_coords_in_all_cam)
 
     if len(x_roi_list[0]) == 0:
-        return [None]*C.num_cam, None, [None]*C.num_cam, None
+        return [None]*C.num_cam, None, None, None
 
     # one hot code for bboxes from above => x_roi (X)
     Y1 = np.array(y_class_num)
     Y1 = np.expand_dims(Y1, axis=0)
+    Y2 = np.array(y_class_regr_label_coords)
+    Y2 = np.expand_dims(Y2, axis=0)
     X_list = []
-    Y2_list = []
-    for x_roi, y_class_regr_label, y_class_regr_coords in zip(x_roi_list, y_class_regr_label_list, y_class_regr_coords_list):
+    for x_roi in zip(x_roi_list):
         # bboxes that iou > C.classifier_min_overlap for all gt bboxes in 300 non_max_suppression bboxes
         X = np.array(x_roi)
-        X = np.expand_dims(X, axis=0)
-        # corresponding labels and corresponding gt bboxes
-        Y2 = np.concatenate([np.array(y_class_regr_label),np.array(y_class_regr_coords)],axis=1)
-        X_list.append(x)
-        Y2_list.append(Y2)
-    Y2 = np.concatenate(Y2_list,axis=1)
-    Y2 = np.expand_dims(Y2, axis=0)
+        X_list.append(X)
     return X_list, Y1, Y2, IoUs
 
 def rpn_to_roi(rpn_layer, regr_layer, C, dim_ordering, use_regr=True, max_boxes=300,overlap_thresh=0.9):
@@ -1424,6 +1410,7 @@ def epipolar(R_list, C, debug_img) :
         
     result = [[] for i in range(C.num_cam)]
     for cbp in sort_result : 
+        print(result[0], '\n', result[1], '\n', result[2])
         if(len(result[0]) > 300) : break
         cur_cam = int(cbp[1])
         box = cbp[2:]
@@ -1765,6 +1752,21 @@ model_rpn.compile(optimizer=optimizer, loss=rpn_loss)
 model_classifier.compile(optimizer=optimizer_classifier, loss=[class_loss_cls, class_loss_regr(len(classes_count)-1, num_cam)], metrics={'dense_class_{}'.format(len(classes_count)): 'accuracy'})
 model_all.compile(optimizer='sgd', loss='mae')
 
+tensorboard_rpn = TensorBoard(
+    log_dir='log',
+    histogram_freq = 0,
+    batch_size=1,
+    write_graph = True,
+    write_grads = True
+)
+tensorboard_rpn.set_model(model_rpn)
+
+def named_logs(model, logs):
+  result = {}
+  for l in zip(model.metrics_names, logs):
+    result[l[0]] = l[1]
+  return result
+
 # Training setting
 total_epochs = len(record_df)
 r_epochs = len(record_df)
@@ -1809,7 +1811,7 @@ for epoch_num in range(num_epochs):
 
             # Train rpn model and get loss value [_, loss_rpn_cls, loss_rpn_regr]
             loss_rpn = model_rpn.train_on_batch(X, Y)
-
+            tensorboard_rpn.on_epoch_end(iter_num, named_logs(model_rpn, loss_rpn))
             # Get predicted rpn from rpn model [rpn_cls, rpn_regr]
             P_rpn = model_rpn.predict_on_batch(X)
 
@@ -1825,24 +1827,6 @@ for epoch_num in range(num_epochs):
                 R_list.append(R)
             # grouped_R : [[box1, .... ,box300], [box1, .... ,box300], [box1, .... ,box300]], len(grouped_R) = cam_num, top 300 grouped R where R in each cam is grouped by epipolar geometry. 
             grouped_R = epipolar(R_list, C, debug_img)
-            color = (0, 255, 0)
-            for i in range(len(R_list[0])) :
-                img_list = [] 
-                for j in range(len(debug_img)) :
-                    img = debug_img[j].copy()
-                    x1, y1, x2, y2 = np.int32(grouped_R[j][i]*C.rpn_stride)
-                    if x1 != -1 : 
-                        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
-                    img_list.append(img)
-
-                plt.figure(figsize=(8,8))
-                for i, img in enumerate(img_list) : 
-                    coord = int('1'+str(C.num_cam)+str(i+1))
-                    plt.grid()
-                    plt.subplot(coord)
-                    plt.imshow(img)
-                plt.show()
-
 
             # note: calc_iou converts from (x1,y1,x2,y2) to (x,y,w,h) format
             # X2: [bboxes1, bboxes2, ...,bboxes_num_cam], bboxes that iou > C.classifier_min_overlap for all gt bboxes in 300 non_max_suppression bboxes
@@ -1860,6 +1844,31 @@ for epoch_num in range(num_epochs):
             # Find out the positive anchors and negative anchors
             neg_samples = np.where(Y1[0, :, -1] == 1)
             pos_samples = np.where(Y1[0, :, -1] == 0)
+
+            if(iter_num % 10 == 0) : 
+                color = (0, 255, 0)
+                for i in range(len(grouped_R[0])) :
+                    img_list = [] 
+                    for j in range(len(debug_img)) :
+                        img = debug_img[j].copy()
+                        x1, y1, x2, y2 = np.int32(grouped_R[j][i]*C.rpn_stride)
+                        if x1 != -1 : 
+                            cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+                        img_list.append(img)
+                        print('x1, y1, x2, y2', x1, y1, x2, y2)
+                    if Y1[0, i, -1]==0 : 
+                        print('ture')
+                    else :
+                        print('false')
+                    print('iou', IouS[i])
+                    plt.figure(figsize=(8,8))
+                    for i, img in enumerate(img_list) : 
+                        coord = int('1'+str(C.num_cam)+str(i+1))
+                        plt.grid()
+                        plt.subplot(coord)
+                        plt.imshow(img)
+                    plt.show()
+
 
             if len(neg_samples) > 0:
                 neg_samples = neg_samples[0]
@@ -1898,16 +1907,28 @@ for epoch_num in range(num_epochs):
                 else:
                     sel_samples = random.choice(pos_samples)
 
-            # training_data: [X, X2[:, sel_samples, :]]
+            # training_data: [X, final_X2]
             # labels: [Y1[:, sel_samples, :], Y2[:, sel_samples, :]]
-            #  X                     => img_data resized image
-            #  X2[:, sel_samples, :] => num_rois (4 in here) bboxes which contains selected neg and pos
-            #  Y1[:, sel_samples, :] => one hot encode for num_rois bboxes which contains selected neg and pos
-            #  Y2[:, sel_samples, :] => labels and gt bboxes for num_rois bboxes which contains selected neg and pos
-            loss_class = model_classifier.train_on_batch([X, X2[:, sel_samples, :]], [Y1[:, sel_samples, :], Y2[:, sel_samples, :]])
+            #  X                     => list of img_data resized image, len(X) = num_cam
+            #  final_X2              => list of num_rois (4 in here) bboxes which contains selected neg and pos, len(final_X2) = num_cam
+            #  Y1[:, sel_samples, :] => one hot encode for num_rois bboxes which contains selected neg and pos, #(1, 4, fg+bg)
+            #  Y2[:, sel_samples, :] => labels and gt bboxes for num_rois bboxes which contains selected neg and pos, #(1, 4, fg*num_cam*8)
+            final_X2 = [ x2[:, sel_samples, :] for x2 in X2] 
+            print('final_X2') 
+            print(final_X2[0]) 
+            print(final_X2[1]) 
+            print(final_X2[2]) 
+            loss_class = model_classifier.train_on_batch( X+final_X2, [Y1[:, sel_samples, :], Y2[:, sel_samples, :]])
 
-            losses[iter_num, 0] = loss_rpn[1]
-            losses[iter_num, 1] = loss_rpn[2]
+            loss_rpn_cls_all_cam = loss_rpn_regr_all_cam = 0
+            for i in range(C.num_cam) : 
+                loss_rpn_cls_all_cam += loss_rpn[2*i+1]
+                loss_rpn_regr_all_cam += loss_rpn[2*(i+1)]
+            loss_rpn_cls_all_cam /= C.num_cam 
+            loss_rpn_regr_all_cam /= C.num_cam 
+
+            losses[iter_num, 0] = loss_rpn_cls_all_cam
+            losses[iter_num, 1] = loss_rpn_regr_all_cam
 
             losses[iter_num, 2] = loss_class[1]
             losses[iter_num, 3] = loss_class[2]
