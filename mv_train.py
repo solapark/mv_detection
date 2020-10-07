@@ -55,8 +55,8 @@ class Config:
         # Anchor box scales
     # Note that if im_size is smaller, anchor_box_scales should be scaled
     # Original anchor_box_scales in the paper is [128, 256, 512]
-        #self.anchor_box_scales = [64, 128, 256] 
-        self.anchor_box_scales = [128, 256, 512] 
+        self.anchor_box_scales = [64, 128, 256] 
+        #self.anchor_box_scales = [128, 256, 512] 
 
         # Anchor box ratios
         self.anchor_box_ratios = [[1, 1], [1./math.sqrt(2), 2./math.sqrt(2)], [2./math.sqrt(2), 1./math.sqrt(2)]]
@@ -1362,6 +1362,27 @@ def get_xy_idx(pnt) :
 def calc_dist_pnt_pnts(pnt, pnts) :
     return (pnt[0] - pnts[:, 0])**2 + (pnt[1] - pnts[:, 1])**2
 
+'''
+def get_closest_box(cur_cam_pnt, grid_h, grid_w, all_boxes): 
+    #all_box = #(4, grid_H, grid_W, anchor=9)
+    xi, yi = get_xy_idx(cur_cam_pnt)
+    if(xi < 0 or yi < 0 or yi >= grid_h or xi >= grid_w):
+        return np.full((4, ), -1)
+    cand_boxes = np.reshape(all_boxes, (4, -1)) #(4, 37*66*9)
+    cand_boxes = np.transpose(cand_boxes, (1, 0)) #(37*66*9, 4)
+    x1, y1, x2, y2 = cand_boxes[:, 0], cand_boxes[:, 1], cand_boxes[:, 2], cand_boxes[:, 3]
+    idxs = np.where((x1 - x2 >= 0) | (y1 - y2 >= 0))
+    cand_boxes = np.delete(cand_boxes, idxs, 0)
+    if not cand_boxes.any() : 
+        return np.full((4, ), -1)
+    x1, y1, x2, y2 = cand_boxes[:, 0], cand_boxes[:, 1], cand_boxes[:, 2], cand_boxes[:, 3]
+    cand_centers = np.zeros((len(cand_boxes), 2))
+    cand_centers[:, 0], cand_centers[:, 1] = (x1+x2)/2, (y1+y2)/2
+    cand_dist = calc_dist_pnt_pnts(cur_cam_pnt, cand_centers)
+    closest_box = cand_boxes[np.argmin(cand_dist)]
+    return closest_box
+
+'''
 def get_closest_box(cur_cam_pnt, grid_h, grid_w, all_boxes): 
     #all_box = #(4, grid_H, grid_W, anchor=9)
     xi, yi = get_xy_idx(cur_cam_pnt)
@@ -1381,7 +1402,7 @@ def get_closest_box(cur_cam_pnt, grid_h, grid_w, all_boxes):
     closest_box = cand_boxes[np.argmin(cand_dist)]
     return closest_box
 
-def epipolar(R_list, C, debug_img) :
+def epipolar(R_list, C, debug_img, iter_num) :
     """Generate matched boxes based on epipolar having top nms pob in one camera.
     Args: (num_anchors = 9)
         R_list: [(all_box, nms_box, nms_prob)]*num_cam,
@@ -1406,11 +1427,11 @@ def epipolar(R_list, C, debug_img) :
         cam = np.full((len(nms_box), 1), float(i)) 
         result = np.concatenate((nms_prob, cam, nms_box), axis = 1)
         prob_cam_box = np.append(prob_cam_box, result, axis=0) 
-    sort_result =  prob_cam_box[prob_cam_box[:, 0].argsort()]
+    sort_result =  prob_cam_box[(-prob_cam_box[:, 0]).argsort()]
         
     result = [[] for i in range(C.num_cam)]
     for cbp in sort_result : 
-        print(result[0], '\n', result[1], '\n', result[2])
+        #print(result[0], '\n', result[1], '\n', result[2])
         if(len(result[0]) > 300) : break
         cur_cam = int(cbp[1])
         box = cbp[2:]
@@ -1422,21 +1443,6 @@ def epipolar(R_list, C, debug_img) :
             if(i == cur_cam):
                 continue
             epipolar_pnts = get_epipolar_line(cur_cam, i, cur_cam_center, C.F, C.grid_rows, C.grid_cols, C.F_to_grid_ratio)
-
-            '''
-            src_img = cv2.resize(debug_img[cur_cam], (640, 360))
-            dst_img = cv2.resize(debug_img[i], (640, 360))
-            magnified_cur_cam_center =( int(cur_cam_center[0]*C.F_to_grid_ratio), int(cur_cam_center[1]*C.F_to_grid_ratio))
-            cv2.circle(src_img, magnified_cur_cam_center, 3, (0, 255, 0), -1)
-            for pnt in epipolar_pnts:
-                cv2.circle(dst_img, (int(pnt[0]*C.F_to_grid_ratio), int(pnt[1]*C.F_to_grid_ratio)), 3, (0, 255, 0), -1)
-            print('first_cam idx', cur_cam, 'second_cam idx', i, 'first_cam center in (1066, 600)', magnified_cur_cam_center)
-            cv2.imshow('src', src_img)
-            cv2.imshow('dst', dst_img)
-            cv2.waitKey()
-            print('epipolar_pnts in grid', epipolar_pnts)
-            '''
-            
             line_cam = i 
             break
         
@@ -1446,18 +1452,6 @@ def epipolar(R_list, C, debug_img) :
             line_cam_box = get_closest_box(pnt, C.grid_rows, C.grid_cols, all_boxes[line_cam])
             result[line_cam].append(line_cam_box)
 
-            '''
-            x1, y1, x2, y2 = np.int32(line_cam_box)*C.F_to_grid_ratio
-            pnt_x = int(pnt[0]*C.F_to_grid_ratio)
-            pnt_y = int(pnt[1]*C.F_to_grid_ratio)
-            print('second_cam pnt in (1066, 600)', (pnt_x, pnt_y), 'box', x1, y1, x2, y2)
-            dst_img = cv2.resize(debug_img[line_cam], (640, 360))
-            cv2.circle(dst_img, (pnt_x, pnt_y), 3, (255, 0, 0), -1)
-            cv2.rectangle(dst_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.imshow('second_cam', dst_img)
-            cv2.waitKey()
-            '''
-
              #3. find matched box in other cams and push them.
             for i in range(C.num_cam):
                 if(i == cur_cam or i == line_cam): continue 
@@ -1466,15 +1460,36 @@ def epipolar(R_list, C, debug_img) :
                 result[i].append(cur_cam_box)
 
                 '''
-                x1, y1, x2, y2 = np.int32(cur_cam_box)*C.F_to_grid_ratio
-                pnt_x = int(cur_cam_pnt[0]*C.F_to_grid_ratio)
-                pnt_y = int(cur_cam_pnt[1]*C.F_to_grid_ratio)
-                print('third_cam pnt in (1066, 600)', (pnt_x, pnt_y), 'box', x1, y1, x2, y2)
-                dst_img = cv2.resize(debug_img[i], (640, 360))
-                cv2.circle(dst_img, (pnt_x, pnt_y), 3, (255, 0, 0), -1)
-                cv2.rectangle(dst_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.imshow('third_cam', dst_img)
-                cv2.waitKey()
+                print('iter_num', iter_num)
+                #if(iter_num>0 and iter_num %10 == 0):
+                if(iter_num %10 == 0):
+                    color = (0, 255, 0)
+                    src_img = debug_img[cur_cam].copy()
+                    dst_img = debug_img[line_cam].copy()
+                    dst_img2 = debug_img[i].copy()
+
+                    magnified_cur_cam_center =( int(cur_cam_center[0]*C.rpn_stride), int(cur_cam_center[1]*C.rpn_stride))
+                    magnified_pnt =( int(pnt[0]*C.rpn_stride), int(pnt[1]*C.rpn_stride))
+                    magnified_cur_cam_pnt =( int(cur_cam_pnt[0]*C.rpn_stride), int(cur_cam_pnt[1]*C.rpn_stride))
+                    first_640 =( int(cur_cam_center[0]*C.F_to_grid_ratio), int(cur_cam_center[1]*C.F_to_grid_ratio))
+                    second_640 =( int(pnt[0]*C.F_to_grid_ratio), int(pnt[1]*C.F_to_grid_ratio))
+                    third_640 =( int(cur_cam_pnt[0]*C.F_to_grid_ratio), int(cur_cam_pnt[1]*C.F_to_grid_ratio))
+                    first_x1, first_y1, first_x2, first_y2 = box.astype(int)*C.rpn_stride
+                    second_x1, second_y1, second_x2, second_y2 = line_cam_box.astype(int)*C.rpn_stride
+                    third_x1, third_y1, third_x2, third_y2 = cur_cam_box.astype(int)*C.rpn_stride
+                    cv2.rectangle(src_img, (first_x1, first_y1), (first_x2, first_y2), color, 2)
+                    cv2.rectangle(dst_img, (second_x1, second_y1), (second_x2, second_y2), color, 2)
+                    cv2.rectangle(dst_img2, (third_x1, third_y1), (third_x2, third_y2), color, 2)
+                    cv2.circle(src_img, magnified_cur_cam_center, 3, color, -1)
+                    cv2.circle(dst_img, magnified_pnt, 3, color, -1)
+                    cv2.circle(dst_img2, magnified_cur_cam_pnt, 3, color, -1)
+                    print('first', cur_cam, first_640)
+                    print('second', line_cam, second_640)
+                    print('third', i, third_640)
+                    cv2.imshow('first', src_img)
+                    cv2.imshow('second', dst_img)
+                    cv2.imshow('third', dst_img2)
+                    cv2.waitKey()
                 '''
     result = [np.array(r) for r in result]
     return result
@@ -1492,13 +1507,13 @@ horizontal_flips = False # Augment with horizontal flips in training.
 vertical_flips = False   # Augment with vertical flips in training. 
 rot_90 = False           # Augment with 90 degree rotations in training. 
 
-output_weight_path = os.path.join(base_path, 'model/model_frcnn_vgg.hdf5')
+output_weight_path = os.path.join(base_path, 'model/mv_model_frcnn_vgg.hdf5')
 
-record_path = os.path.join(base_path, 'model/record.csv') # Record data (used to save the losses, classification accuracy and mean average precision)
+record_path = os.path.join(base_path, 'model/mv_record.csv') # Record data (used to save the losses, classification accuracy and mean average precision)
 
 base_weight_path = os.path.join(base_path, 'model/vgg16_weights_tf_dim_ordering_tf_kernels.h5')
 
-config_output_filename = os.path.join(base_path, 'model_vgg_config.pickle')
+config_output_filename = os.path.join(base_path, 'mv_model_vgg_config.pickle')
 
 # Create the config
 C = Config()
@@ -1558,12 +1573,11 @@ print('Num train samples (images) {}'.format(len(train_imgs)))
 # Get train data generator which generate X, Y, image_data
 data_gen_train = get_anchor_gt(train_imgs, C, get_img_output_length, mode='train')
 
-'''
 X_list, Y_list_1d, image_data_list, debug_img_list, debug_num_pos_list = next(data_gen_train)
 
 Y_list = []
 for i in range(C.num_cam):
-    Y_list.append([Y_list_1d[0], Y_list_1d[1]])
+    Y_list.append([Y_list_1d[i*2], Y_list_1d[i*2+1]])
 
 for X, Y, image_data, debug_img, debug_num_pos in zip(X_list, Y_list, image_data_list, debug_img_list, debug_num_pos_list) : 
     print('Original image:', 'height=%d width=%d'%(image_data['height'], image_data['width']))
@@ -1608,7 +1622,7 @@ for X, Y, image_data, debug_img, debug_num_pos in zip(X_list, Y_list, image_data
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         color = (0, 255, 0)
         #   cv2.putText(img, 'gt bbox', (gt_x1, gt_y1-5), cv2.FONT_HERSHEY_DUPLEX, 0.7, color, 1)
-        cv2.rectangle(imgbox, (gt_x1, gt_y1), (gt_x2, gt_y2), color, 2)
+        cv2.rectangle(img, (gt_x1, gt_y1), (gt_x2, gt_y2), color, 2)
         cv2.circle(img, (int((gt_x1+gt_x2)/2), int((gt_y1+gt_y2)/2)), 3, color, -1)
 
         # Add text
@@ -1644,31 +1658,8 @@ for i, img in enumerate(img_list) :
     plt.subplot(coord)
     plt.imshow(img)
 plt.show()
-'''
 
 input_shape_img = (None, None, 3)
-
-'''
-img_input = Input(shape=input_shape_img)
-roi_input = Input(shape=(None, 4))
-
-shared_layers = nn_base(img_input, trainable=True)
-
-# define the base network (VGG here, can be Resnet50, Inception, etc)
-shared_layers = nn_base(img_input, trainable=True)
-
-# define the RPN, built on the base layers
-num_anchors = len(C.anchor_box_scales) * len(C.anchor_box_ratios) # 9
-rpn = rpn_layer(shared_layers, num_anchors)
-
-classifier = classifier_layer(shared_layers, roi_input, C.num_rois, nb_classes=len(classes_count))
-
-model_rpn = Model(img_input, rpn[:2])
-model_classifier = Model([img_input, roi_input], classifier)
-
-# this is a model that holds both the RPN and the classifier, used to load/save weights for the models
-model_all = Model([img_input, roi_input], rpn[:2] + classifier)
-'''
 
 num_cam = C.num_cam
 img_input = []
@@ -1714,7 +1705,7 @@ if not os.path.isfile(C.model_path):
         print('This is the first time of your training')
         print('loading weights from {}'.format(C.base_net_weights))
         model_rpn.load_weights(C.base_net_weights, by_name=True)
-        model_classifier.load_weights(C.base_net_weights, by_name=True)
+        #model_classifier.load_weights(C.base_net_weights, by_name=True)
     except:
         print('Could not load pretrained model weights. Weights can be found in the keras application folder \
             https://github.com/fchollet/keras/tree/master/keras/applications')
@@ -1771,7 +1762,7 @@ def named_logs(model, logs):
 total_epochs = len(record_df)
 r_epochs = len(record_df)
 
-epoch_length = 1000
+epoch_length = 500
 num_epochs = 40
 iter_num = 0
 
@@ -1825,8 +1816,26 @@ for epoch_num in range(num_epochs):
                 rpn_boxs = P_rpn[cam_idx+1]
                 R = rpn_to_roi(rpn_probs, rpn_boxs, C, K.common.image_dim_ordering(), use_regr=True, overlap_thresh=0.7, max_boxes=300)
                 R_list.append(R)
+                if(iter_num == 1):
+                    _, nms_boxes, nms_probs = R
+                    img = debug_img[i].copy()
+                    color = (0, 255, 0)
+                    for b, p in zip(nms_boxes, nms_probs) :
+                        x1, y1, x2, y2 = b.astype(int)*C.rpn_stride
+                        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+                    color = (0, 0, 255)
+                    for b, p in zip(nms_boxes, nms_probs) :
+                        x1, y1, x2, y2 = b.astype(int)*C.rpn_stride
+                        cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
+                        break
+                    name = 'mv_epoch_' + str(epoch_num)+'_nms_cam_' + str(i) + '.jpg'
+                    cv2.imwrite(name, img)
+                    #cv2.imshow(name, img)
+                #cv2.waitKey(1)
+                #continue
+                        
             # grouped_R : [[box1, .... ,box300], [box1, .... ,box300], [box1, .... ,box300]], len(grouped_R) = cam_num, top 300 grouped R where R in each cam is grouped by epipolar geometry. 
-            grouped_R = epipolar(R_list, C, debug_img)
+            grouped_R = epipolar(R_list, C, debug_img, iter_num)
 
             # note: calc_iou converts from (x1,y1,x2,y2) to (x,y,w,h) format
             # X2: [bboxes1, bboxes2, ...,bboxes_num_cam], bboxes that iou > C.classifier_min_overlap for all gt bboxes in 300 non_max_suppression bboxes
@@ -1845,7 +1854,8 @@ for epoch_num in range(num_epochs):
             neg_samples = np.where(Y1[0, :, -1] == 1)
             pos_samples = np.where(Y1[0, :, -1] == 0)
 
-            if(iter_num % 10 == 0) : 
+            '''
+            if(iter_num == 10) : 
                 color = (0, 255, 0)
                 for i in range(len(grouped_R[0])) :
                     img_list = [] 
@@ -1861,13 +1871,12 @@ for epoch_num in range(num_epochs):
                     else :
                         print('false')
                     print('iou', IouS[i])
-                    plt.figure(figsize=(8,8))
-                    for i, img in enumerate(img_list) : 
-                        coord = int('1'+str(C.num_cam)+str(i+1))
-                        plt.grid()
-                        plt.subplot(coord)
-                        plt.imshow(img)
-                    plt.show()
+
+                    for k, img in enumerate(img_list) : 
+                        name = str(k)
+                        cv2.imshow(name, img)
+                    cv2.waitKey()
+            '''
 
 
             if len(neg_samples) > 0:
@@ -1914,10 +1923,12 @@ for epoch_num in range(num_epochs):
             #  Y1[:, sel_samples, :] => one hot encode for num_rois bboxes which contains selected neg and pos, #(1, 4, fg+bg)
             #  Y2[:, sel_samples, :] => labels and gt bboxes for num_rois bboxes which contains selected neg and pos, #(1, 4, fg*num_cam*8)
             final_X2 = [ x2[:, sel_samples, :] for x2 in X2] 
+            '''
             print('final_X2') 
             print(final_X2[0]) 
             print(final_X2[1]) 
             print(final_X2[2]) 
+            '''
             loss_class = model_classifier.train_on_batch( X+final_X2, [Y1[:, sel_samples, :], Y2[:, sel_samples, :]])
 
             loss_rpn_cls_all_cam = loss_rpn_regr_all_cam = 0
