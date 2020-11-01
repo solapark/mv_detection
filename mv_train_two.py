@@ -1346,6 +1346,26 @@ def rpn_loss_cls(num_anchors):
 
     return rpn_loss_cls_fixed_num
 
+def view_invariant_loss(alpha=.3):
+    """Loss function for rpn classification
+    Args:
+        pos_neg_idx: (anchor_idx, pos_idx, neg_idx) 
+        y_pred: view invariant features 
+    Returns:
+    """
+    def triplet_loss_func(anchor_pos_neg, y_pred):
+        anchor_idx, positive_idx, negative_idx = anchor_pos_neg
+        anchor = y_pred[anchor_idx]
+        positive = y_pred[positive_idx]
+        negative = y_pred[negative_idx]
+
+        positive_dist = K.sum(K.square(anchor - positive), axis=-1) 
+        negative_dist = K.sum(K.square(anchor - negative), axis=-1) 
+
+        loss_1 = positive_dist - negative_dist + alpha
+        loss = K.maximum(loss_1, 0.0)
+        return loss
+    return triplet_loss_func
 
 #def class_loss_regr(num_classes):
 def class_loss_regr(num_classes, num_cam):
