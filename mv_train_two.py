@@ -67,6 +67,8 @@ class Config:
         self.im_size = 600
 
         self.num_features = 512
+        
+        self.view_invar_feature_size = 128
 
         # image channel-wise mean to subtract
         self.img_channel_mean = [103.939, 116.779, 123.68]
@@ -781,6 +783,24 @@ def nn_base(input_tensor=None, trainable=False):
     # x = MaxPooling2D((2, 2), strides=(2, 2), name='block5_pool')(x)
 
     return x
+
+def view_invariant_layer_model(num_anchors, view_invar_feature_size):
+    """Create a view invariant layer
+        Step1: Pass through the feature map from rpn body layer to convolutional layers
+                Keep the padding 'same' to preserve the feature map's size
+        Step2: Pass the step1 to two (1,1) convolutional layer to replace the fully connected layer. num_anchors*view_invar_feature_size (9*128 in here) channels for 0~1 sigmoid view invariant feature
+    Args:
+        num_anchors: 9 in here
+        view_invar_feature_size: 32 in here
+
+    Returns:
+        view invariant feature 
+    """
+    model = Sequential(name='vi_layer')
+    model.add(Conv2D(512, (3, 3), padding='same', activation='relu', kernel_initializer='normal', name='vi_conv1'))
+    model.add(Conv2D(512, (3, 3), padding='same', activation='relu', kernel_initializer='normal', name='vi_conv2'))
+    model.add(Conv2D(num_anchors * view_invar_feature_size, (1, 1), activation='sigmoid', kernel_initializer='uniform', name='vi_out'))
+    return model
 
 def rpn_layer_model(num_anchors):
     """Create a rpn layer
@@ -1942,53 +1962,7 @@ def epipolar(R_list, C, debug_img, iter_num) :
     result = [np.array(r) for r in result]
     return result
 
-def train():
-    # Augmentation flag
-    horizontal_flips = False # Augment with horizontal flips in training. 
-    vertical_flips = False   # Augment with vertical flips in training. 
-    rot_90 = False           # Augment with 90 degree rotations in training. 
-
-    C.use_horizontal_flips = horizontal_flips
-    C.use_vertical_flips = vertical_flips
-    C.rot_90 = rot_90
-
-    #--------------------------------------------------------#
-    # This step will spend some time to load the data        #
-    #--------------------------------------------------------#
-    st = time.time()
-    train_imgs, classes_count, class_mapping = get_data(train_path, C.num_cam)
-    print()
-    print('Spend %0.2f mins to load the data' % ((time.time()-st)/60) )
-
-    if 'bg' not in classes_count:
-        classes_count['bg'] = 0
-        class_mapping['bg'] = len(class_mapping)
-# e.g.
-#    classes_count: {'Car': 2383, 'Mobile phone': 1108, 'Person': 3745, 'bg': 0}
-#    class_mapping: {'Person': 0, 'Car': 1, 'Mobile phone': 2, 'bg': 3}
-    C.class_mapping = class_mapping
-
-    print('Training images per class:')
-    pprint.pprint(classes_count)
-    print('Num classes (including bg) = {}'.format(len(classes_count)))
-    print(class_mapping)
-
-# Save the configuration
-    with open(config_output_filename, 'wb') as config_f:
-        pickle.dump(C,config_f)
-        print('Config has been written to {}, and can be loaded when testing to ensure correct results'.format(config_output_filename))
-
-
-# Shuffle the images with seed
-    random.seed(1)
-    random.shuffle(train_imgs)
-
-    print('Num train samples (images) {}'.format(len(train_imgs)))
-
-# Get train data generator which generate X, Y, image_data
-    data_gen_train = get_anchor_gt(train_imgs, C, get_img_output_length, mode='train')
-
-    '''
+def draw(X_list, Y_list_1d, image_data_list, debug_img_list, debug_num_pos_list) : 
     X_list, Y_list_1d, image_data_list, debug_img_list, debug_num_pos_list = next(data_gen_train)
 
     Y_list = []
@@ -2074,6 +2048,56 @@ def train():
         plt.subplot(coord)
         plt.imshow(img)
     plt.show()
+
+def train():
+    # Augmentation flag
+    horizontal_flips = False # Augment with horizontal flips in training. 
+    vertical_flips = False   # Augment with vertical flips in training. 
+    rot_90 = False           # Augment with 90 degree rotations in training. 
+
+    C.use_horizontal_flips = horizontal_flips
+    C.use_vertical_flips = vertical_flips
+    C.rot_90 = rot_90
+
+    #--------------------------------------------------------#
+    # This step will spend some time to load the data        #
+    #--------------------------------------------------------#
+    st = time.time()
+    train_imgs, classes_count, class_mapping = get_data(train_path, C.num_cam)
+    print()
+    print('Spend %0.2f mins to load the data' % ((time.time()-st)/60) )
+
+    if 'bg' not in classes_count:
+        classes_count['bg'] = 0
+        class_mapping['bg'] = len(class_mapping)
+# e.g.
+#    classes_count: {'Car': 2383, 'Mobile phone': 1108, 'Person': 3745, 'bg': 0}
+#    class_mapping: {'Person': 0, 'Car': 1, 'Mobile phone': 2, 'bg': 3}
+    C.class_mapping = class_mapping
+
+    print('Training images per class:')
+    pprint.pprint(classes_count)
+    print('Num classes (including bg) = {}'.format(len(classes_count)))
+    print(class_mapping)
+
+# Save the configuration
+    with open(config_output_filename, 'wb') as config_f:
+        pickle.dump(C,config_f)
+        print('Config has been written to {}, and can be loaded when testing to ensure correct results'.format(config_output_filename))
+
+
+# Shuffle the images with seed
+    random.seed(1)
+    random.shuffle(train_imgs)
+
+    print('Num train samples (images) {}'.format(len(train_imgs)))
+
+# Get train data generator which generate X, Y, image_data
+    data_gen_train = get_anchor_gt(train_imgs, C, get_img_output_length, mode='train')
+
+    '''
+    X_list, Y_list_1d, image_data_list, debug_img_list, debug_num_pos_list = next(data_gen_train)
+    draw(X_list, Y_list_1d, image_data_list, debug_img_list, debug_num_pos_list)
     '''
     input_shape_img = (None, None, 3)
 
@@ -2094,22 +2118,26 @@ def train():
 # define the RPN, built on the base layers
     num_anchors = len(C.anchor_box_scales) * len(C.anchor_box_ratios) # 9
     rpn_body, rpn_class, rpn_regr = rpn_layer_model(num_anchors)
+    view_invariant_layer = view_invariant_layer_model(num_anchors, C.view_invar_feature_size)
     rpns = []
+    view_invariants = []
     for i in range(num_cam) :
         body = rpn_body(shared_layers[i])
         cls = rpn_class(body)
         regr = rpn_regr(body)
-        #rpns.extend([cls, regr, shared_layers[i]])
+        view_invariant = view_invariant_layer(body)
         rpns.extend([cls, regr])
+        view_invariants.append(view_invariant)
 
     classifier = classifier_layer(shared_layers, roi_input, C.num_rois, num_cam, nb_classes=len(classes_count))
 
     model_rpn = Model(img_input, rpns)
+    model_view_invariant = Model(img_input, view_invariants)
     classifier_input = img_input + roi_input
     model_classifier = Model(classifier_input, classifier)
 
 # this is a model that holds both the RPN and the classifier, used to load/save weights for the models
-    model_all = Model(classifier_input, rpns + classifier)
+    model_all = Model(classifier_input, rpns + view_invariants + classifier)
 
 # Because the google colab can only run the session several hours one time (then you need to connect again), 
 # we need to save the model and load the model to continue training
@@ -2119,6 +2147,7 @@ def train():
             print('This is the first time of your training')
             print('loading weights from {}'.format(C.base_net_weights))
             model_rpn.load_weights(C.base_net_weights, by_name=True)
+            model_view_invariant.load_weights(C.base_net_weights, by_name=True)
             model_classifier.load_weights(C.base_net_weights, by_name=True)
         except:
             print('Could not load pretrained model weights. Weights can be found in the keras application folder \
@@ -2131,6 +2160,7 @@ def train():
         print('Continue training based on previous trained model')
         print('Loading weights from {}'.format(C.model_path))
         model_rpn.load_weights(C.model_path, by_name=True)
+        model_view_invariant.load_weights(C.model_path, by_name=True)
         model_classifier.load_weights(C.model_path, by_name=True)
         
         # Load the records
@@ -2149,11 +2179,13 @@ def train():
         print('Already train %dK batches'% (len(record_df)))
 
     optimizer = Adam(lr=1e-5)
+    optimizer_view_invariant = Adam(lr=1e-5)
     optimizer_classifier = Adam(lr=1e-5)
     rpn_loss = []
     for i in range(num_cam) : 
         rpn_loss.extend([rpn_loss_cls(num_anchors), rpn_loss_regr(num_anchors)])
     model_rpn.compile(optimizer=optimizer, loss=rpn_loss)
+    model_view_invariant.compile(optimizer=optimizer_view_invariant, loss=view_invariant_loss)
     model_classifier.compile(optimizer=optimizer_classifier, loss=[class_loss_cls, class_loss_regr(len(classes_count)-1, num_cam)], metrics={'dense_class_{}'.format(len(classes_count)): 'accuracy'})
     model_all.compile(optimizer='sgd', loss='mae')
 
@@ -2429,6 +2461,7 @@ if __name__ == '__main__' :
     config_output_filename = '/home/sap/frcnn_keras/mv_two_model_vgg_config.pickle'
     num_rois = 4 # Number of RoIs to process at once.
     num_features = 512
+    view_invar_feature_size = 128
     demo_bbox_threshold = 0.7
     num_demo = 10
     F01 = [[2.459393284555216e-07, 1.240428133324114e-05, -0.0019388276339150634], [1.3911908206709622e-05, -3.0469249778638727e-06, -0.00732105994034854], [-0.0017512954375120127, -0.00015617893705877073, 1.0]]
@@ -2447,8 +2480,8 @@ if __name__ == '__main__' :
     C.base_net_weights = base_weight_path
     C.F = F
 
-    #train()
-    show_demos(config_output_filename, test_path, demo_bbox_threshold, num_demo)
+    train()
+    #show_demos(config_output_filename, test_path, demo_bbox_threshold, num_demo)
     #calc_map(config_output_filename, test_path)
 
 def plot_record(record_df) : 
