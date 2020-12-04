@@ -16,12 +16,13 @@ import tensorflow as tf
 import pandas as pd
 import os
 from utils import get_file_list_from_dir
+from itertools import permutations
 
 from sklearn.metrics import average_precision_score
 
 from keras import backend as K
 from keras.optimizers import Adam, SGD, RMSprop
-from keras.layers import Flatten, Dense, Input, Conv2D, MaxPooling2D, Dropout, Concatenate
+from keras.layers import Flatten, Dense, Input, Conv2D, MaxPooling2D, Dropout, Concatenate, Reshape, Lambda
 from keras.layers import GlobalAveragePooling2D, GlobalMaxPooling2D, TimeDistributed
 from keras.engine.topology import get_source_inputs
 from keras.utils import layer_utils
@@ -69,6 +70,7 @@ class Config:
         self.num_features = 512
         
         self.view_invar_feature_size = 128
+        self.alpha = .3
 
         # image channel-wise mean to subtract
         self.img_channel_mean = [103.939, 116.779, 123.68]
@@ -103,7 +105,12 @@ class Config:
         self.raw_img_cols = 640
         self.F = 0
         self.epipolar_x_interval = 3
+
         self.num_cam = 2
+        self.num_nms = 300
+    
+        self.vi_max_overlap = .4
+        self.max_match_dist = 10000
 
         self.resize_img_rows= self.im_size #600
         self.resize_ratio = self.resize_img_rows / self.raw_img_rows
@@ -615,6 +622,43 @@ def get_data(input_path, num_cam):
         
         return all_data, classes_count, class_mapping
 
+class ViewInvariantAlign(Layer):
+    '''ViewInvariantAlign layer for triplet loss.
+    # input
+        view_invariant: view_invariant_features
+        anchor_pos_neg_idx: anchor_pos_neg_idx
+            [
+             [[anchor_cam, target_cam], [anchor_idx, pos_idx, neg_idx]],
+             [[anchor_cam, target_cam], [anchor_idx, pos_idx, neg_idx]],
+             ...
+            ]
+    # output
+        [anchor, pos, neg] :
+            anchor # (None, view_invariant_feature_size)
+            pos # (None, view_invariant_feature_size)
+            neg # (None, view_invariant_feature_size)
+    '''
+    def __init__(self, **kwargs):
+        super(ViewInvariantAlign, self).__init__(**kwargs)
+
+    def __call__(self, view_invariant, anchor_pos_neg_idx):
+        anchors, poss, negs = [], [], []
+        for i in range(len(anchor_pos_neg_idx)) :
+            anchor_cam, target_cam, anchor_idx, pos_idx, neg_idx = anchor_pos_neg_idx[i]
+
+            anchor = view_invariant[anchor_cam][anchor_idx]
+            pos = view_invariant[target_cam][pos_idx]
+            neg = view_invariant[target_cam][neg_idx]
+
+            anchors.append(anchor)
+            poss.append(pos)
+            negs.append(neg)
+            
+        final_anchors = K.concatenate(anchors, axis=0)
+        final_poss = K.concatenate(poss, axis=0)
+        final_negs = K.concatenate(negs, axis=0)
+        return [final_anchors, final_poss, final_negs]
+
 class RoiPoolingConv(Layer):
     '''ROI pooling layer for 2D inputs.
     See Spatial Pyramid Pooling in Deep Convolutional Networks for Visual Recognition,
@@ -784,14 +828,14 @@ def nn_base(input_tensor=None, trainable=False):
 
     return x
 
-def view_invariant_layer_model(num_anchors, view_invar_feature_size):
+def view_invariant_layer_model(H, W, num_anchors, view_invar_feature_size):
     """Create a view invariant layer
         Step1: Pass through the feature map from rpn body layer to convolutional layers
                 Keep the padding 'same' to preserve the feature map's size
         Step2: Pass the step1 to two (1,1) convolutional layer to replace the fully connected layer. num_anchors*view_invar_feature_size (9*128 in here) channels for 0~1 sigmoid view invariant feature
     Args:
         num_anchors: 9 in here
-        view_invar_feature_size: 32 in here
+        view_invar_feature_size
 
     Returns:
         view invariant feature 
@@ -800,7 +844,17 @@ def view_invariant_layer_model(num_anchors, view_invar_feature_size):
     model.add(Conv2D(512, (3, 3), padding='same', activation='relu', kernel_initializer='normal', name='vi_conv1'))
     model.add(Conv2D(512, (3, 3), padding='same', activation='relu', kernel_initializer='normal', name='vi_conv2'))
     model.add(Conv2D(num_anchors * view_invar_feature_size, (1, 1), activation='sigmoid', kernel_initializer='uniform', name='vi_out'))
+    model.add(Reshape((H, W, num_anchors, view_invar_feature_size), name='vi_reshape'))
+    #model.add(Lambda(lambda x: K.l2_normalize(x, -1), name='vi_l2_norm'))
+    model.add(Lambda(lambda x: K.expand_dims(x, 1), name='vi_expand_dim'))
     return model
+
+def view_invariant_conc_layer(view_invariants):
+    #view_invariants x : list of (None, 1, H, W, C)
+    return Concatenate(axis=1, name='vi_pooling')(view_invariants)
+    
+def view_invariant_train_layer(view_invariant, anchor_pos_neg_idx):
+    return ViewInvariantAlign()(view_invariant, anchor_pos_neg_idx)
 
 def rpn_layer_model(num_anchors):
     """Create a rpn layer
@@ -852,26 +906,6 @@ def rpn_layer(base_layers, num_anchors):
     x_regr = Conv2D(num_anchors * 4, (1, 1), activation='linear', kernel_initializer='zero', name='rpn_out_regress')(x)
 
     return [x_class, x_regr, base_layers]
-
-class ViewPooling(Layer):
-    ''' pooling layer for ROI from different view.
-    # Arguments
-        num_cam: int
-            Size of cam.
-    # Input shape
-        list of two 5D tensors with shape: `(1, num_rois, pool_size, pool_size, channels)`
-    # Output shape
-        5D tensor with shape:
-        `(1, num_cam *num_rois, pool_size, pool_size, channels)`
-    '''
-    def __init__(self, num_cam, **kwargs):
-
-        self.num_cam = num_cam
-        super(ViewPooling, self).__init__(**kwargs)
-
-    def call(self, x):
-        assert(len(x) == self.num_cam)
-        return K.concatenate(x, axis=-1)
 
 #def classifier_layer(base_layers, input_rois, num_rois, nb_classes = 4):
 def classifier_layer(base_layers, input_rois, num_rois, num_cam, nb_classes = 4):
@@ -1346,24 +1380,52 @@ def rpn_loss_cls(num_anchors):
 
     return rpn_loss_cls_fixed_num
 
-def view_invariant_loss(alpha=.3):
+def view_invariant_loss(alpha=.3, vi_feature_size=32):
     """Loss function for rpn classification
     Args:
-        pos_neg_idx: (anchor_idx, pos_idx, neg_idx) 
-        y_pred: view invariant features 
+        y_pred: view invariant features, shape == (1,, num_cam, H, W, A, vi_featue_size)
+        y_true: anchor_target idx, shape == (1, 2, num_GT, 4)
+            first : batch_size(dummy)
+            second : anchor or target ?
+            third : GT idx
+            fourth : cam, H, W, A
     Returns:
     """
-    def triplet_loss_func(anchor_pos_neg, y_pred):
-        anchor_idx, positive_idx, negative_idx = anchor_pos_neg
-        anchor = y_pred[anchor_idx]
-        positive = y_pred[positive_idx]
-        negative = y_pred[negative_idx]
+    def triplet_loss_func(y_true, y_pred):
+        y_true = y_true[0, :, :, :, 0, 0]
+        #y_true = y_true[0]
+        y_true = tf.cast(y_true, 'int32') #(2, numSample, 4)
+        anchor_idx = y_true[0] #(numSample, 4)
+        pos_idx = y_true[1] #(numSample, 4)
+        neg_cand_idx = pos_idx[:, 0] #(numSample, )
+        neg_cand_idx = tf.expand_dims(neg_cand_idx, -1) #(numSample, 1)
 
-        positive_dist = K.sum(K.square(anchor - positive), axis=-1) 
-        negative_dist = K.sum(K.square(anchor - negative), axis=-1) 
+        anchor = tf.gather_nd(y_pred[0], anchor_idx) #(numSample, vi_feature_size)
+        positive = tf.gather_nd(y_pred[0], pos_idx) #(numSample, vi_feature_size)
+        neg_cand = tf.gather_nd(y_pred[0], neg_cand_idx) #(numSample, H, W, A, vi_feature_size)
+
+        anchor_reshape = anchor[:, tf.newaxis, tf.newaxis, tf.newaxis, :] #(numSample, 1, 1, 1, vi_feature_size)
+        neg_cand_dist = tf.reduce_sum(tf.square(anchor_reshape - neg_cand), axis = -1) #(numSample, H, W, A)
+
+        pos_idx_sort = tf.contrib.framework.sort(pos_idx, 0)
+        pos_idx_sort = tf.cast(pos_idx_sort, 'int64')
+        pos_idx_shape = tf.shape(pos_idx_sort)
+        num_sample = pos_idx_shape[0]
+        ones = tf.ones(num_sample)
+        neg_cand_dist_shape = tf.shape(neg_cand_dist, out_type='int64') 
+        neg_cand_dist_shape = tf.reshape(neg_cand_dist_shape, (4, ))
+        neg_mask = tf.sparse.to_dense(tf.sparse.SparseTensor(indices=pos_idx_sort, values = ones, dense_shape=neg_cand_dist_shape))
+        neg_mask = tf.cast(neg_mask, 'bool')
+        pos_mask = ~neg_mask
+        neg_cand_dist_not_pos = tf.boolean_mask(neg_cand_dist, pos_mask)
+        neg_cand_dist_not_pos = tf.reshape(neg_cand_dist_not_pos, (num_sample, -1))
+
+        positive_dist = tf.reduce_sum(tf.square(anchor - positive), -1) #(numSample, )
+        negative_dist = tf.reduce_min(neg_cand_dist_not_pos, axis = [-1]) #(numSample, )
 
         loss_1 = positive_dist - negative_dist + alpha
-        loss = K.maximum(loss_1, 0.0)
+        loss = tf.reduce_sum(tf.maximum(loss_1, 0.0)) #()
+
         return loss
     return triplet_loss_func
 
@@ -1409,8 +1471,8 @@ def non_max_suppression_fast(boxes, probs, overlap_thresh=0.9, max_boxes=300):
     x2 = boxes[:, 2]
     y2 = boxes[:, 3]
 
-    np.testing.assert_array_less(x1, x2)
-    np.testing.assert_array_less(y1, y2)
+#    np.testing.assert_array_less(x1, x2)
+#    np.testing.assert_array_less(y1, y2)
 
     # if the bounding boxes integers, convert them to floats --
     # this is important since we'll be doing a bunch of divisions
@@ -1426,6 +1488,12 @@ def non_max_suppression_fast(boxes, probs, overlap_thresh=0.9, max_boxes=300):
     # sort the bounding boxes 
     idxs = np.argsort(probs)
 
+    # sort the bounding boxes 
+    invalid_idxs = np.where((x1[idxs] - x2[idxs] >= 0) | (y1[idxs] - y2[idxs] >= 0))
+    idxs = np.delete(idxs, invalid_idxs, 0)
+    np.testing.assert_array_less(x1[idxs], x2[idxs])
+    np.testing.assert_array_less(y1[idxs], y2[idxs])
+
     # keep looping while some indexes still remain in the indexes
     # list
     while len(idxs) > 0:
@@ -1434,7 +1502,6 @@ def non_max_suppression_fast(boxes, probs, overlap_thresh=0.9, max_boxes=300):
         last = len(idxs) - 1
         i = idxs[last]
         pick.append(i)
-
         # find the intersection
 
         xx1_int = np.maximum(x1[i], x1[idxs[:last]])
@@ -1461,9 +1528,10 @@ def non_max_suppression_fast(boxes, probs, overlap_thresh=0.9, max_boxes=300):
             break
 
     # return only the bounding boxes that were picked using the integer data type
+    boxes_idx = pick
     boxes = boxes[pick].astype("int")
     probs = probs[pick]
-    return boxes, probs
+    return boxes_idx, boxes, probs
 
 def apply_regr_np(X, T):
     """Apply regression layer to all anchors in one feature map
@@ -1762,23 +1830,14 @@ def rpn_to_roi(rpn_layer, regr_layer, C, dim_ordering, use_regr=True, max_boxes=
     all_boxes = np.reshape(A.transpose((0, 3, 1, 2)), (4, -1)).transpose((1, 0))  # shape=(4050, 4)
     all_probs = rpn_layer.transpose((0, 3, 1, 2)).reshape((-1))                   # shape=(4050,)
 
-    x1 = all_boxes[:, 0]
-    y1 = all_boxes[:, 1]
-    x2 = all_boxes[:, 2]
-    y2 = all_boxes[:, 3]
-
-    # Find out the bboxes which is illegal and delete them from bboxes list
-    idxs = np.where((x1 - x2 >= 0) | (y1 - y2 >= 0))
-
-    all_boxes = np.delete(all_boxes, idxs, 0)
-    all_probs = np.delete(all_probs, idxs, 0)
-
     # Apply non_max_suppression
     # Only extract the bboxes. Don't need rpn probs in the later process
     #result = non_max_suppression_fast(all_boxes, all_probs, overlap_thresh=overlap_thresh, max_boxes=max_boxes)[0]
-    nms_boxes, nms_probs = non_max_suppression_fast(all_boxes, all_probs, overlap_thresh=overlap_thresh, max_boxes=max_boxes)
+    nms_idx_1d, nms_boxes, nms_probs = non_max_suppression_fast(all_boxes, all_probs, overlap_thresh=overlap_thresh, max_boxes=max_boxes)
 
-    return A, nms_boxes, nms_probs
+    nms_idx_A, nms_idx_H, nms_idx_W = np.unravel_index(nms_idx_1d, (rpn_layer.shape[3], rpn_layer.shape[1], rpn_layer.shape[2]))
+    nms_idx_2d = np.column_stack((nms_idx_H, nms_idx_W, nms_idx_A))
+    return A, nms_idx_2d, nms_boxes, nms_probs
 
 def get_center(box):
     x1, y1, x2, y2 = box
@@ -1982,6 +2041,218 @@ def epipolar(R_list, C, debug_img, iter_num) :
     result = [np.array(r) for r in result]
     return result
 
+def get_anchor_idx(R, bboxes, width, height, im_size, rpn_stride, vi_max_overlap):
+    """get anchor idx which has biggest iou with GT
+    Args:
+        R: bboxes
+    """
+    # get image dimensions for resizing
+    (resized_width, resized_height) = get_new_img_size(width, height, im_size)
+
+    gta = np.zeros((len(bboxes), 4))
+    for bbox_num, bbox in enumerate(bboxes):
+        # get the GT box coordinates, and resize to account for image resizing
+        # gta[bbox_num, 0] = (40 * (600 / 800)) / 16 = int(round(1.875)) = 2 (x in feature map)
+        gta[bbox_num, 0] = int(round(bbox['x1'] * (resized_width / float(width))/rpn_stride))
+        gta[bbox_num, 1] = int(round(bbox['y1'] * (resized_height / float(height))/rpn_stride))
+        gta[bbox_num, 2] = int(round(bbox['x2'] * (resized_width / float(width))/rpn_stride))
+        gta[bbox_num, 3] = int(round(bbox['y2'] * (resized_height / float(height))/rpn_stride))
+
+    IoUs = [] # for debugging only
+    anchor_idx = []
+
+    # R.shape[0]: number of bboxes (=300 from non_max_suppression)
+    # Iterate through all the ground-truth bboxes to calculate the iou
+    for cur_gta in gta:
+        best_iou = 0.0
+        best_bbox = -1
+        for hi in range(R.shape[1]):
+            for wi in range(R.shape[2]):
+                for ai in range(R.shape[3]):
+                    cur_R = np.rint(R[:, hi, wi, ai])
+                    curr_iou = iou(cur_gta, cur_R)
+                    if curr_iou > best_iou:
+                        best_iou = curr_iou
+                        best_bbox_idx = [hi, wi, ai]
+                        best_bbox = cur_R
+
+        if vi_max_overlap <= best_iou:
+            # this is anchor ! 
+            anchor_idx.append(best_bbox_idx)
+        else : 
+            anchor_idx.append([-1]*3)
+        iou(cur_gta, best_bbox)
+        IoUs.append(best_iou)
+    return anchor_idx, IoUs
+
+def get_neg_idx(anchor, pos_idx, features):
+    dist = np.square(anchor - features)
+    neg_idx = np.argmin(dist) 
+    if(neg_idx == pos_idx) :
+        dist[neg_idx] = math.inf
+        neg_idx = np.argmin(dist) 
+    return neg_idx
+    
+def get_anchor_target_idx(grouped_R, img_datas, C):
+    """get anchor target idx 
+        Args : 
+            grouped_R : list of R (len : num_cam)
+                R : [all_boxes, _, _, _]
+                    all_boxes : roi of P_rpn (shape: H, W, A, 4)
+            img_datas : GT box
+        Output :
+            anchor_target_idx : anchor_idx(cam1) and target_idx (shape: 1, 2, num_sample, 4, 1)
+                first : num_batch
+                second : 0 = anchor, 1 = target
+                third : num_sample = camPerm * numGTbox
+                fourth : (cam_idx, h_idx, w_idx, a_idx)
+    """
+    im_size, rpn_stride, vi_max_overlap = C.im_size, C.rpn_stride, C.vi_max_overlap
+    width, height = img_datas[0]['width'], img_datas[0]['height']
+    num_anchor = len(img_datas[0]['bboxes'])
+    anchor_idx_list = -np.ones((C.num_cam, num_anchor, 4))
+    ious = []
+    for cam_idx in range(C.num_cam) :
+        bboxes = img_datas[cam_idx]['bboxes']
+        R, _, _, _ = grouped_R[cam_idx]
+        anchor_idx, iou = get_anchor_idx(R, bboxes, width, height, im_size, rpn_stride, vi_max_overlap)
+        cam_idx_array = np.repeat(cam_idx, num_anchor).reshape(-1, 1)
+        anchor_idx_list[cam_idx] = np.concatenate([cam_idx_array, anchor_idx], 1)
+        ious.append(iou)
+
+    invalid_anchor = np.where(anchor_idx_list[:,:,1:] == [-1, -1, -1])[1] #(axis 1)
+    anchor_idx_list = np.delete(anchor_idx_list, invalid_anchor, axis = 1)
+
+    cam_idx_list = np.arange(C.num_cam)
+    cam_idx_perms = np.array(list(permutations(cam_idx_list, 2))) #(Perm_size, 2)
+    result = anchor_idx_list[cam_idx_perms] #(2, Per_size, num_anchor, 4)
+    result = result.reshape(2, -1, 4)
+    return result[np.newaxis, :, :, :, np.newaxis]
+
+
+
+def reid(vi_feats, R_list, C) :
+    """Generate matched boxes based on epipolar having top nms pob in one camera.
+    Args: (num_anchors = 9)
+        R_list: [(all_box, nms_idx, nms_box, nms_prob)]*num_cam,
+                #all_box = #(4, grid_H, grid_W, anchor=9)
+                #nms_idx = #(300, 3(=H,W,A)) 
+                #nms_box = #(300, 4)
+                #nms_pob = #(300,)
+        C: config
+        debug_img: [debug_img]*num_cam
+
+    Returns:
+        result: [matched_box_list_in_cam0,  matched_box_list_in_cam1, ...]
+            matched_box_list_in_cam0 : #(n, 4), n is the number of boxes
+    """
+    all_boxes_list = [np.expand_dims(R[0].transpose(1, 2, 3, 0), 0) for R in R_list]
+    nms_idx_list = [R[1] for R in R_list]
+    nms_box_list = [R[2] for R in R_list]
+    nms_prob_list = [R[3] for R in R_list]
+    
+    cam_idx_list = np.arange(C.num_cam)
+    cam_idx = np.repeat(cam_idx_list, C.num_nms).reshape(-1, 1)
+    all_boxes = np.concatenate(all_boxes_list, 0) 
+    nms_idx = np.concatenate(nms_idx_list, 0) 
+    nms_box = np.concatenate(nms_box_list, 0)
+    nms_prob = np.concatenate(nms_prob_list, 0)
+    result = np.concatenate([cam_idx, nms_idx, nms_box], 1)
+
+    #sorting
+    top_N_result =  result[nms_prob.argsort()[-C.num_nms:]]
+    top_N_result = top_N_result.astype(int)
+        
+    #anchor
+    vi_feats = vi_feats[0] #(num_cam, H, W, A, feat_size)
+    anchor_cam_idx = top_N_result[:, 0]
+    anchor_idx = top_N_result[:, 1:4]
+    anchor_box = top_N_result[:, 4:8]
+    anchor_H_idx, anchor_W_idx, anchor_A_idx = anchor_idx[:, 0], anchor_idx[:, 1], anchor_idx[:, 2]
+    anchor_feats = vi_feats[anchor_cam_idx, anchor_H_idx, anchor_W_idx, anchor_A_idx] #(num_nms, feat_size)
+    anchor_feats = anchor_feats[:, np.newaxis, np.newaxis, np.newaxis, :] #(num_nms, 1, 1, 1, feat_size)
+
+    reid_box = -np.ones((C.num_cam, C.num_nms, 4))
+    nms_idx = np.arange(C.num_nms)
+    reid_box[(anchor_cam_idx, nms_idx)] = anchor_box
+
+    #target
+    for i in range(1, C.num_cam):
+        target_cam_idx = (anchor_cam_idx+i) % C.num_cam
+        target_feats_cand = vi_feats[target_cam_idx] #(num_nms, H, W, A, feat_size)
+        dist = np.sum(np.square(target_feats_cand - anchor_feats), -1) #(num_nms, H, W, A)
+        matched_idx_1d = np.argmin(dist.reshape(len(dist), -1), -1) #(num_nms,)
+        matched_idx_H, matched_idx_W, matched_idx_A = np.unravel_index(matched_idx_1d, dist.shape[1:])
+
+        matched_idx = (nms_idx, matched_idx_H, matched_idx_W, matched_idx_A)
+        matched_dist = dist[matched_idx] #(num_nms, )
+        is_match = matched_dist < C.max_match_dist
+        matched_nms_idx = nms_idx[is_match]
+        target_cam_idx = target_cam_idx[is_match]
+        matched_idx_H = matched_idx_H[is_match]
+        matched_idx_W = matched_idx_W[is_match]
+        matched_idx_A = matched_idx_A[is_match]
+        matched_box_idx = (target_cam_idx, matched_idx_H, matched_idx_W, matched_idx_A)
+        reid_box[target_cam_idx, matched_nms_idx] = all_boxes[matched_box_idx] 
+    reid_box_list = [reid_box_in_one_cam for reid_box_in_one_cam in reid_box]
+    return reid_box_list
+    '''
+    matches_boxes = [[] for _ in range(C.num_cam)]
+    for cbp in top_N_result : 
+        anchor_cam = int(cbp[1])
+        anchor_idx = cbp[2:5]
+        anchor_box = cbp[5:]
+        ahchor_feats = vi_feats[0, anchor_cam][anchor_idx] #(featsize, )
+        matches_boxes[anchor_cam].append(anchor_box)
+        for i in range(C.num_cam):
+            if(i == anchor_cam):
+                continue
+            cand_feats = vi_feats[0, i] #(H, W, A, featsize)
+            dist = np.sum(np.square(cand_feat - anchor_feats), -1) #(H, W, A)
+            matched_idx = np.argmin(dist)#(3, )
+            if(dist > thresh) :
+                result[i].append([-1, -1, -1, -1])
+            else : 
+                matched_box = all_boxes_list[i][:, matched_idx]
+                result[i].append(matched_box)
+    result = [np.array(r) for r in result]
+    '''
+
+    '''
+    if(iter_num %10 == 0):
+        color = (0, 255, 0)
+        src_img = debug_img[cur_cam].copy()
+        dst_img = debug_img[line_cam].copy()
+        dst_img2 = debug_img[i].copy()
+
+        magnified_cur_cam_center =( int(cur_cam_center[0]*C.rpn_stride), int(cur_cam_center[1]*C.rpn_stride))
+        magnified_pnt =( int(pnt[0]*C.rpn_stride), int(pnt[1]*C.rpn_stride))
+        magnified_cur_cam_pnt =( int(cur_cam_pnt[0]*C.rpn_stride), int(cur_cam_pnt[1]*C.rpn_stride))
+        first_640 =( int(cur_cam_center[0]*C.F_to_grid_ratio), int(cur_cam_center[1]*C.F_to_grid_ratio))
+        second_640 =( int(pnt[0]*C.F_to_grid_ratio), int(pnt[1]*C.F_to_grid_ratio))
+        third_640 =( int(cur_cam_pnt[0]*C.F_to_grid_ratio), int(cur_cam_pnt[1]*C.F_to_grid_ratio))
+        first_x1, first_y1, first_x2, first_y2 = box.astype(int)*C.rpn_stride
+        second_x1, second_y1, second_x2, second_y2 = line_cam_box.astype(int)*C.rpn_stride
+        third_x1, third_y1, third_x2, third_y2 = cur_cam_box.astype(int)*C.rpn_stride
+        cv2.rectangle(src_img, (first_x1, first_y1), (first_x2, first_y2), color, 2)
+        cv2.rectangle(dst_img, (second_x1, second_y1), (second_x2, second_y2), color, 2)
+        cv2.rectangle(dst_img2, (third_x1, third_y1), (third_x2, third_y2), color, 2)
+        cv2.circle(src_img, magnified_cur_cam_center, 3, color, -1)
+        cv2.circle(dst_img, magnified_pnt, 3, color, -1)
+        cv2.circle(dst_img2, magnified_cur_cam_pnt, 3, color, -1)
+        print('first', cur_cam, first_640)
+        print('second', line_cam, second_640)
+        print('third', i, third_640)
+        src_img = cv2.resize(src_img, None, fx = .5, fy = .5)
+        dst_img = cv2.resize(dst_img, None, fx = .5, fy = .5)
+        dst_img2 = cv2.resize(dst_img2, None, fx = .5, fy = .5)
+        cv2.imshow('first', src_img)
+        cv2.imshow('second', dst_img)
+        cv2.imshow('third', dst_img2)
+        cv2.waitKey()
+    '''
+    return result
+ 
 def draw(X_list, Y_list_1d, image_data_list, debug_img_list, debug_num_pos_list) : 
     X_list, Y_list_1d, image_data_list, debug_img_list, debug_num_pos_list = next(data_gen_train)
 
@@ -2127,6 +2398,7 @@ def train():
     for i in range(num_cam) : 
         img_input.append(Input(shape=input_shape_img))
         roi_input.append(Input(shape=(None, 4)))
+    #anchor_pos_neg_input = [Input(shape=(None, 2)), Input(shape=(None, 2)), Input(shape=(None, 2))]
 
 # define the base network (VGG here, can be Resnet50, Inception, etc)
 
@@ -2138,7 +2410,7 @@ def train():
 # define the RPN, built on the base layers
     num_anchors = len(C.anchor_box_scales) * len(C.anchor_box_ratios) # 9
     rpn_body, rpn_class, rpn_regr = rpn_layer_model(num_anchors)
-    view_invariant_layer = view_invariant_layer_model(num_anchors, C.view_invar_feature_size)
+    view_invariant_layer = view_invariant_layer_model(C.grid_rows, int(C.grid_cols), num_anchors, C.view_invar_feature_size)
     rpns = []
     view_invariants = []
     for i in range(num_cam) :
@@ -2149,15 +2421,18 @@ def train():
         rpns.extend([cls, regr])
         view_invariants.append(view_invariant)
 
+    view_invariant_conc = view_invariant_conc_layer(view_invariants)
+    #view_invariant_train = view_invariant_train_layer(view_invariants, anchor_pos_neg_input)
     classifier = classifier_layer(shared_layers, roi_input, C.num_rois, num_cam, nb_classes=len(classes_count))
 
     model_rpn = Model(img_input, rpns)
-    model_view_invariant = Model(img_input, view_invariants)
+    model_view_invariant = Model(img_input, view_invariant_conc)
+    #model_view_invariant_train = Model(img_input + [anchor_pos_neg_input], view_invariant_train)
     classifier_input = img_input + roi_input
     model_classifier = Model(classifier_input, classifier)
 
 # this is a model that holds both the RPN and the classifier, used to load/save weights for the models
-    model_all = Model(classifier_input, rpns + view_invariants + classifier)
+    model_all = Model(classifier_input, rpns + [view_invariant_conc] + classifier)
 
 # Because the google colab can only run the session several hours one time (then you need to connect again), 
 # we need to save the model and load the model to continue training
@@ -2168,19 +2443,22 @@ def train():
             print('loading weights from {}'.format(C.base_net_weights))
             model_rpn.load_weights(C.base_net_weights, by_name=True)
             model_view_invariant.load_weights(C.base_net_weights, by_name=True)
+            #model_view_invariant_train.load_weights(C.base_net_weights, by_name=True)
             model_classifier.load_weights(C.base_net_weights, by_name=True)
         except:
             print('Could not load pretrained model weights. Weights can be found in the keras application folder \
                 https://github.com/fchollet/keras/tree/master/keras/applications')
         
         # Create the record.csv file to record losses, acc and mAP
-        record_df = pd.DataFrame(columns=['mean_overlapping_bboxes', 'class_acc', 'loss_rpn_cls', 'loss_rpn_regr', 'loss_class_cls', 'loss_class_regr', 'curr_loss', 'elapsed_time', 'mAP'])
+        #record_df = pd.DataFrame(columns=['mean_overlapping_bboxes', 'class_acc', 'loss_rpn_cls', 'loss_rpn_regr', 'loss_class_cls', 'loss_class_regr', 'curr_loss', 'elapsed_time', 'mAP'])
+        record_df = pd.DataFrame(columns=['mean_overlapping_bboxes', 'class_acc', 'loss_rpn_cls', 'loss_rpn_regr', 'loss_class_cls', 'loss_class_regr', 'loss_vi', 'curr_loss', 'elapsed_time', 'mAP'])
     else:
         # If this is a continued training, load the trained model from before
         print('Continue training based on previous trained model')
         print('Loading weights from {}'.format(C.model_path))
         model_rpn.load_weights(C.model_path, by_name=True)
         model_view_invariant.load_weights(C.model_path, by_name=True)
+        #model_view_invariant_train.load_weights(C.model_path, by_name=True)
         model_classifier.load_weights(C.model_path, by_name=True)
         
         # Load the records
@@ -2192,6 +2470,7 @@ def train():
         r_loss_rpn_regr = record_df['loss_rpn_regr']
         r_loss_class_cls = record_df['loss_class_cls']
         r_loss_class_regr = record_df['loss_class_regr']
+        #r_loss_vi = record_df['loss_vi']
         r_curr_loss = record_df['curr_loss']
         r_elapsed_time = record_df['elapsed_time']
         r_mAP = record_df['mAP']
@@ -2205,7 +2484,7 @@ def train():
     for i in range(num_cam) : 
         rpn_loss.extend([rpn_loss_cls(num_anchors), rpn_loss_regr(num_anchors)])
     model_rpn.compile(optimizer=optimizer, loss=rpn_loss)
-    model_view_invariant.compile(optimizer=optimizer_view_invariant, loss=view_invariant_loss)
+    model_view_invariant.compile(optimizer=optimizer_view_invariant, loss=view_invariant_loss(C.alpha, C.view_invar_feature_size))
     model_classifier.compile(optimizer=optimizer_classifier, loss=[class_loss_cls, class_loss_regr(len(classes_count)-1, num_cam)], metrics={'dense_class_{}'.format(len(classes_count)): 'accuracy'})
     model_all.compile(optimizer='sgd', loss='mae')
 
@@ -2264,15 +2543,16 @@ def train():
                 # Get predicted rpn from rpn model [rpn_cls, rpn_regr]
                 P_rpn = model_rpn.predict_on_batch(X)
 
-                # R: (bboxes, prob) (shape=(300,4), shape=(300,) )
                 # Convert rpn layer to roi bboxes
-                #R_list = [ (all_boxes, nms_boxes, nms_probs), (all_boxes, nms_boxes, nms_probs), (all_boxes, nms_boxes, nms_probs), ...], len(R_list) = num_cam
+                # R_list : list of R, (len=num_cam)
+                # R: (all_boxes, nms_idx, nms_bboxes, nms_probs) (shape=(H, W, A, 4), shape=(300, 3), shape=(300,4), shape=(300,) )
+                # nms_idx : (H, W, A)
                 R_list = []
                 for i in range(num_cam):
                     cam_idx = i*2
                     rpn_probs = P_rpn[cam_idx]
                     rpn_boxs = P_rpn[cam_idx+1]
-                    R = rpn_to_roi(rpn_probs, rpn_boxs, C, K.common.image_dim_ordering(), use_regr=True, overlap_thresh=0.7, max_boxes=300)
+                    R = rpn_to_roi(rpn_probs, rpn_boxs, C, K.common.image_dim_ordering(), use_regr=True, overlap_thresh=0.7, max_boxes = C.num_nms)
                     R_list.append(R)
                     '''
                     if(iter_num == 0):
@@ -2294,9 +2574,29 @@ def train():
                     cv2.waitKey(0)
                     #continue
                     '''
-                            
+                           
+                view_invariant_features = model_view_invariant.predict_on_batch(X)
+                with open('vi_featurs.pickle', 'wb') as fr :
+                    pickle.dump(view_invariant_features, fr)
+
+                with open('R_list.pickle', 'wb') as fr : 
+                    pickle.dump(R_list, fr)
+
+                with open('img_data.pickle', 'wb') as fr : 
+                    pickle.dump(img_data, fr)
+
+                with open('C.pickle', 'wb') as fr : 
+                    pickle.dump(C, fr)
+
+                anchor_target_idx = get_anchor_target_idx(R_list, img_data, C)
+                if(anchor_target_idx.size == 0):
+                    print('continue')
+                    continue    
+                vi_loss = model_view_invariant.train_on_batch(X, anchor_target_idx)
+                
                 # grouped_R : [[box1, .... ,box300], [box1, .... ,box300], [box1, .... ,box300]], len(grouped_R) = cam_num, top 300 grouped R where R in each cam is grouped by epipolar geometry. 
-                grouped_R = epipolar(R_list, C, debug_img, iter_num)
+                grouped_R = reid(view_invariant_features, R_list, C)
+                #grouped_R = epipolar(R_list, C, debug_img, iter_num)
 
                 # note: calc_iou converts from (x1,y1,x2,y2) to (x,y,w,h) format
                 # X2: [bboxes1, bboxes2, ...,bboxes_num_cam], bboxes that iou > C.classifier_min_overlap for all gt bboxes in 300 non_max_suppression bboxes
@@ -2375,6 +2675,8 @@ def train():
                 losses[iter_num, 3] = loss_class[2]
                 losses[iter_num, 4] = loss_class[3]
 
+                losses[iter_num, 5] = vi_loss
+
 #            losses[iter_num, 2] = 0
 #            losses[iter_num, 3] = 0
 #            losses[iter_num, 4] = 0
@@ -2382,7 +2684,7 @@ def train():
                 iter_num += 1
 
                 progbar.update(iter_num, [('rpn_cls', np.mean(losses[:iter_num, 0])), ('rpn_regr', np.mean(losses[:iter_num, 1])),
-                                          ('final_cls', np.mean(losses[:iter_num, 2])), ('final_regr', np.mean(losses[:iter_num, 3]))])
+                                          ('final_cls', np.mean(losses[:iter_num, 2])), ('final_regr', np.mean(losses[:iter_num, 3])), ('vi', np.mean(losses[:iter_num, 5]))])
 
                 if iter_num == epoch_length:
                     loss_rpn_cls = np.mean(losses[:, 0])
@@ -2390,6 +2692,7 @@ def train():
                     loss_class_cls = np.mean(losses[:, 2])
                     loss_class_regr = np.mean(losses[:, 3])
                     class_acc = np.mean(losses[:, 4])
+                    loss_vi = np.mean(losses[:, 5])
 
                     mean_overlapping_bboxes = float(sum(rpn_accuracy_for_epoch)) / len(rpn_accuracy_for_epoch)
                     #mean_overlapping_bboxes = 0
@@ -2402,11 +2705,12 @@ def train():
                         print('Loss RPN regression: {}'.format(loss_rpn_regr))
                         print('Loss Detector classifier: {}'.format(loss_class_cls))
                         print('Loss Detector regression: {}'.format(loss_class_regr))
-                        print('Total loss: {}'.format(loss_rpn_cls + loss_rpn_regr + loss_class_cls + loss_class_regr))
+                        print('Loss VI: {}'.format(loss_vi))
+                        print('Total loss: {}'.format(loss_rpn_cls + loss_rpn_regr + loss_class_cls + loss_class_regr+loss_vi))
                         print('Elapsed time: {}'.format(time.time() - start_time))
                         elapsed_time = (time.time()-start_time)/60
 
-                    curr_loss = loss_rpn_cls + loss_rpn_regr + loss_class_cls + loss_class_regr
+                    curr_loss = loss_rpn_cls + loss_rpn_regr + loss_class_cls + loss_class_regr + loss_vi
                     iter_num = 0
                     start_time = time.time()
 
@@ -2422,6 +2726,7 @@ def train():
                                'loss_rpn_regr':round(loss_rpn_regr, 3), 
                                'loss_class_cls':round(loss_class_cls, 3), 
                                'loss_class_regr':round(loss_class_regr, 3), 
+                               'loss_vi':round(loss_vi, 3), 
                                'curr_loss':round(curr_loss, 3), 
                                'elapsed_time':round(elapsed_time, 3), 
                                'mAP': 0}
