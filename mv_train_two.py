@@ -69,8 +69,6 @@ class Config:
 
         self.num_features = 512
         
-        self.view_invar_feature_size = 128
-        self.alpha = .3
 
         # image channel-wise mean to subtract
         self.img_channel_mean = [103.939, 116.779, 123.68]
@@ -110,7 +108,9 @@ class Config:
         self.num_nms = 300
     
         self.vi_max_overlap = .4
-        self.max_match_dist = 10000
+        self.max_match_dist = np.inf
+        self.vi_alpha = .3
+        self.view_invar_feature_size = 128
 
         self.resize_img_rows= self.im_size #600
         self.resize_ratio = self.resize_img_rows / self.raw_img_rows
@@ -622,43 +622,6 @@ def get_data(input_path, num_cam):
         
         return all_data, classes_count, class_mapping
 
-class ViewInvariantAlign(Layer):
-    '''ViewInvariantAlign layer for triplet loss.
-    # input
-        view_invariant: view_invariant_features
-        anchor_pos_neg_idx: anchor_pos_neg_idx
-            [
-             [[anchor_cam, target_cam], [anchor_idx, pos_idx, neg_idx]],
-             [[anchor_cam, target_cam], [anchor_idx, pos_idx, neg_idx]],
-             ...
-            ]
-    # output
-        [anchor, pos, neg] :
-            anchor # (None, view_invariant_feature_size)
-            pos # (None, view_invariant_feature_size)
-            neg # (None, view_invariant_feature_size)
-    '''
-    def __init__(self, **kwargs):
-        super(ViewInvariantAlign, self).__init__(**kwargs)
-
-    def __call__(self, view_invariant, anchor_pos_neg_idx):
-        anchors, poss, negs = [], [], []
-        for i in range(len(anchor_pos_neg_idx)) :
-            anchor_cam, target_cam, anchor_idx, pos_idx, neg_idx = anchor_pos_neg_idx[i]
-
-            anchor = view_invariant[anchor_cam][anchor_idx]
-            pos = view_invariant[target_cam][pos_idx]
-            neg = view_invariant[target_cam][neg_idx]
-
-            anchors.append(anchor)
-            poss.append(pos)
-            negs.append(neg)
-            
-        final_anchors = K.concatenate(anchors, axis=0)
-        final_poss = K.concatenate(poss, axis=0)
-        final_negs = K.concatenate(negs, axis=0)
-        return [final_anchors, final_poss, final_negs]
-
 class RoiPoolingConv(Layer):
     '''ROI pooling layer for 2D inputs.
     See Spatial Pyramid Pooling in Deep Convolutional Networks for Visual Recognition,
@@ -845,7 +808,7 @@ def view_invariant_layer_model(H, W, num_anchors, view_invar_feature_size):
     model.add(Conv2D(512, (3, 3), padding='same', activation='relu', kernel_initializer='normal', name='vi_conv2'))
     model.add(Conv2D(num_anchors * view_invar_feature_size, (1, 1), activation='sigmoid', kernel_initializer='uniform', name='vi_out'))
     model.add(Reshape((H, W, num_anchors, view_invar_feature_size), name='vi_reshape'))
-    #model.add(Lambda(lambda x: K.l2_normalize(x, -1), name='vi_l2_norm'))
+    model.add(Lambda(lambda x: K.l2_normalize(x, -1), name='vi_l2_norm'))
     model.add(Lambda(lambda x: K.expand_dims(x, 1), name='vi_expand_dim'))
     return model
 
@@ -853,9 +816,6 @@ def view_invariant_conc_layer(view_invariants):
     #view_invariants x : list of (None, 1, H, W, C)
     return Concatenate(axis=1, name='vi_pooling')(view_invariants)
     
-def view_invariant_train_layer(view_invariant, anchor_pos_neg_idx):
-    return ViewInvariantAlign()(view_invariant, anchor_pos_neg_idx)
-
 def rpn_layer_model(num_anchors):
     """Create a rpn layer
         Step1: Pass through the feature map from base layer to a 3x3 512 channels convolutional layer
@@ -956,7 +916,6 @@ def union(au, bu, area_intersection):
     area_union = area_a + area_b - area_intersection
     return area_union
 
-
 def intersection(ai, bi):
     x = max(ai[0], bi[0])
     y = max(ai[1], bi[1])
@@ -965,7 +924,6 @@ def intersection(ai, bi):
     if w < 0 or h < 0:
         return 0
     return w*h
-
 
 def iou(a, b):
     # a and b should be (x1,y1,x2,y2)
@@ -1380,7 +1338,7 @@ def rpn_loss_cls(num_anchors):
 
     return rpn_loss_cls_fixed_num
 
-def view_invariant_loss(alpha=.3, vi_feature_size=32):
+def view_invariant_loss(alpha=.3):
     """Loss function for rpn classification
     Args:
         y_pred: view invariant features, shape == (1,, num_cam, H, W, A, vi_featue_size)
@@ -1393,35 +1351,17 @@ def view_invariant_loss(alpha=.3, vi_feature_size=32):
     """
     def triplet_loss_func(y_true, y_pred):
         y_true = y_true[0, :, :, :, 0, 0]
-        #y_true = y_true[0]
         y_true = tf.cast(y_true, 'int32') #(2, numSample, 4)
         anchor_idx = y_true[0] #(numSample, 4)
         pos_idx = y_true[1] #(numSample, 4)
-        neg_cand_idx = pos_idx[:, 0] #(numSample, )
-        neg_cand_idx = tf.expand_dims(neg_cand_idx, -1) #(numSample, 1)
+        neg_idx = y_true[2] #(numSample, 4)
 
         anchor = tf.gather_nd(y_pred[0], anchor_idx) #(numSample, vi_feature_size)
         positive = tf.gather_nd(y_pred[0], pos_idx) #(numSample, vi_feature_size)
-        neg_cand = tf.gather_nd(y_pred[0], neg_cand_idx) #(numSample, H, W, A, vi_feature_size)
+        negative = tf.gather_nd(y_pred[0], neg_idx) #(numSample, vi_feature_size)
 
-        anchor_reshape = anchor[:, tf.newaxis, tf.newaxis, tf.newaxis, :] #(numSample, 1, 1, 1, vi_feature_size)
-        neg_cand_dist = tf.reduce_sum(tf.square(anchor_reshape - neg_cand), axis = -1) #(numSample, H, W, A)
-
-        pos_idx_sort = tf.contrib.framework.sort(pos_idx, 0)
-        pos_idx_sort = tf.cast(pos_idx_sort, 'int64')
-        pos_idx_shape = tf.shape(pos_idx_sort)
-        num_sample = pos_idx_shape[0]
-        ones = tf.ones(num_sample)
-        neg_cand_dist_shape = tf.shape(neg_cand_dist, out_type='int64') 
-        neg_cand_dist_shape = tf.reshape(neg_cand_dist_shape, (4, ))
-        neg_mask = tf.sparse.to_dense(tf.sparse.SparseTensor(indices=pos_idx_sort, values = ones, dense_shape=neg_cand_dist_shape))
-        neg_mask = tf.cast(neg_mask, 'bool')
-        pos_mask = ~neg_mask
-        neg_cand_dist_not_pos = tf.boolean_mask(neg_cand_dist, pos_mask)
-        neg_cand_dist_not_pos = tf.reshape(neg_cand_dist_not_pos, (num_sample, -1))
-
-        positive_dist = tf.reduce_sum(tf.square(anchor - positive), -1) #(numSample, )
-        negative_dist = tf.reduce_min(neg_cand_dist_not_pos, axis = [-1]) #(numSample, )
+        positive_dist = tf.sqrt(tf.reduce_sum(tf.square(anchor - positive), -1)) #(numSample, )
+        negative_dist = tf.sqrt(tf.reduce_sum(tf.square(anchor - negative), -1)) #(numSample, )
 
         loss_1 = positive_dist - negative_dist + alpha
         loss = tf.reduce_sum(tf.maximum(loss_1, 0.0)) #()
@@ -2085,21 +2025,14 @@ def get_anchor_idx(R, bboxes, width, height, im_size, rpn_stride, vi_max_overlap
         IoUs.append(best_iou)
     return anchor_idx, IoUs
 
-def get_neg_idx(anchor, pos_idx, features):
-    dist = np.square(anchor - features)
-    neg_idx = np.argmin(dist) 
-    if(neg_idx == pos_idx) :
-        dist[neg_idx] = math.inf
-        neg_idx = np.argmin(dist) 
-    return neg_idx
-    
-def get_anchor_target_idx(grouped_R, img_datas, C):
-    """get anchor target idx 
+def get_anchor_pos_neg_idx(R_list, img_datas, vi_features, C):
+    """get anchor idx, postive idx, negative idx
         Args : 
-            grouped_R : list of R (len : num_cam)
+            R_list : list of R (len : num_cam)
                 R : [all_boxes, _, _, _]
                     all_boxes : roi of P_rpn (shape: H, W, A, 4)
             img_datas : GT box
+            vi_features : view_invariant feature (shape: H, W, A, 4)
         Output :
             anchor_target_idx : anchor_idx(cam1) and target_idx (shape: 1, 2, num_sample, 4, 1)
                 first : num_batch
@@ -2110,11 +2043,13 @@ def get_anchor_target_idx(grouped_R, img_datas, C):
     im_size, rpn_stride, vi_max_overlap = C.im_size, C.rpn_stride, C.vi_max_overlap
     width, height = img_datas[0]['width'], img_datas[0]['height']
     num_anchor = len(img_datas[0]['bboxes'])
-    anchor_idx_list = -np.ones((C.num_cam, num_anchor, 4))
+
+    #anchor
+    anchor_idx_list = -np.ones((C.num_cam, num_anchor, 4), dtype=int)
     ious = []
     for cam_idx in range(C.num_cam) :
         bboxes = img_datas[cam_idx]['bboxes']
-        R, _, _, _ = grouped_R[cam_idx]
+        R, _, _, _ = R_list[cam_idx]
         anchor_idx, iou = get_anchor_idx(R, bboxes, width, height, im_size, rpn_stride, vi_max_overlap)
         cam_idx_array = np.repeat(cam_idx, num_anchor).reshape(-1, 1)
         anchor_idx_list[cam_idx] = np.concatenate([cam_idx_array, anchor_idx], 1)
@@ -2123,13 +2058,42 @@ def get_anchor_target_idx(grouped_R, img_datas, C):
     invalid_anchor = np.where(anchor_idx_list[:,:,1:] == [-1, -1, -1])[1] #(axis 1)
     anchor_idx_list = np.delete(anchor_idx_list, invalid_anchor, axis = 1)
 
+    #add pos
     cam_idx_list = np.arange(C.num_cam)
     cam_idx_perms = np.array(list(permutations(cam_idx_list, 2))) #(Perm_size, 2)
-    result = anchor_idx_list[cam_idx_perms] #(2, Per_size, num_anchor, 4)
-    result = result.reshape(2, -1, 4)
-    return result[np.newaxis, :, :, :, np.newaxis]
+    anchor_pos_idx_list = anchor_idx_list[cam_idx_perms] #(2, Per_size, num_anchor, 4)
+    anchor_pos_idx_list = anchor_pos_idx_list.reshape(2, -1, 4)
 
+    #add neg
+    vi_features = vi_features[0]
+    num_sample = anchor_pos_idx_list.shape[1]
+    anchor_idx, positive_idx = anchor_pos_idx_list[0], anchor_pos_idx_list[1]
+    anchor_idx = (anchor_idx[:, 0], anchor_idx[:, 1], anchor_idx[:, 2], anchor_idx[:, 3])
+    positive_idx = (positive_idx[:, 0], positive_idx[:, 1], positive_idx[:, 2], positive_idx[:, 3])
+    negative_cam_idx = positive_idx[0]
+    anchor_feature = vi_features[anchor_idx] #(numSample, feature_size)
+    postive_feature = vi_features[positive_idx] #(numSample, feature_size)
+    negative_cand_feature = vi_features[negative_cam_idx] #(numSample, H, W, A, vi_feature_size)
 
+    pos_dist = np.sqrt(np.sum(np.square(anchor_feature - postive_feature), -1)) #(numSample, )
+    anchor_feature = anchor_feature[:, np.newaxis, np.newaxis, np.newaxis, :] #(numSample, 1, 1, 1, feature_size)
+    neg_cand_dist = np.sqrt(np.sum(np.square(anchor_feature - negative_cand_feature), -1)) #(numSample, H, W, A)
+    neg_cand_dist[neg_cand_dist<=pos_dist[:, np.newaxis, np.newaxis, np.newaxis]] = np.inf #throw away hard neg
+    neg_cand_dist_2d = neg_cand_dist.reshape((num_sample, -1)) #(numSample, H*W*A)
+    negative_idx_1d = np.argmin(neg_cand_dist_2d, 1)
+    negative_idx_3d = np.unravel_index(negative_idx_1d, neg_cand_dist.shape[1:])
+    negative_idx_4d = [negative_cam_idx] + list(negative_idx_3d)
+    negative_idx = np.column_stack(negative_idx_4d)
+
+    '''
+    sample_idx = np.arange(num_sample)
+    min_dist = neg_cand_dist_2d[(sample_idx, negative_idx_1d)]
+    invalid_idx = np.where(min_dist > pos_dist+alpha)[0] #throw away easy neg
+    '''
+
+    anchor_pos_neg_idx = np.concatenate([anchor_pos_idx_list, negative_idx[np.newaxis, :, :]])
+    #anchor_pos_neg_idx = np.delete(anchor_pos_neg_idx, invalid_idx, 1)
+    return anchor_pos_neg_idx[np.newaxis, :, :, :, np.newaxis, np.newaxis]
 
 def reid(vi_feats, R_list, C) :
     """Generate matched boxes based on epipolar having top nms pob in one camera.
@@ -2180,7 +2144,7 @@ def reid(vi_feats, R_list, C) :
     for i in range(1, C.num_cam):
         target_cam_idx = (anchor_cam_idx+i) % C.num_cam
         target_feats_cand = vi_feats[target_cam_idx] #(num_nms, H, W, A, feat_size)
-        dist = np.sum(np.square(target_feats_cand - anchor_feats), -1) #(num_nms, H, W, A)
+        dist = np.sqrt(np.sum(np.square(target_feats_cand - anchor_feats), -1)) #(num_nms, H, W, A)
         matched_idx_1d = np.argmin(dist.reshape(len(dist), -1), -1) #(num_nms,)
         matched_idx_H, matched_idx_W, matched_idx_A = np.unravel_index(matched_idx_1d, dist.shape[1:])
 
@@ -2196,62 +2160,6 @@ def reid(vi_feats, R_list, C) :
         reid_box[target_cam_idx, matched_nms_idx] = all_boxes[matched_box_idx] 
     reid_box_list = [reid_box_in_one_cam for reid_box_in_one_cam in reid_box]
     return reid_box_list
-    '''
-    matches_boxes = [[] for _ in range(C.num_cam)]
-    for cbp in top_N_result : 
-        anchor_cam = int(cbp[1])
-        anchor_idx = cbp[2:5]
-        anchor_box = cbp[5:]
-        ahchor_feats = vi_feats[0, anchor_cam][anchor_idx] #(featsize, )
-        matches_boxes[anchor_cam].append(anchor_box)
-        for i in range(C.num_cam):
-            if(i == anchor_cam):
-                continue
-            cand_feats = vi_feats[0, i] #(H, W, A, featsize)
-            dist = np.sum(np.square(cand_feat - anchor_feats), -1) #(H, W, A)
-            matched_idx = np.argmin(dist)#(3, )
-            if(dist > thresh) :
-                result[i].append([-1, -1, -1, -1])
-            else : 
-                matched_box = all_boxes_list[i][:, matched_idx]
-                result[i].append(matched_box)
-    result = [np.array(r) for r in result]
-    '''
-
-    '''
-    if(iter_num %10 == 0):
-        color = (0, 255, 0)
-        src_img = debug_img[cur_cam].copy()
-        dst_img = debug_img[line_cam].copy()
-        dst_img2 = debug_img[i].copy()
-
-        magnified_cur_cam_center =( int(cur_cam_center[0]*C.rpn_stride), int(cur_cam_center[1]*C.rpn_stride))
-        magnified_pnt =( int(pnt[0]*C.rpn_stride), int(pnt[1]*C.rpn_stride))
-        magnified_cur_cam_pnt =( int(cur_cam_pnt[0]*C.rpn_stride), int(cur_cam_pnt[1]*C.rpn_stride))
-        first_640 =( int(cur_cam_center[0]*C.F_to_grid_ratio), int(cur_cam_center[1]*C.F_to_grid_ratio))
-        second_640 =( int(pnt[0]*C.F_to_grid_ratio), int(pnt[1]*C.F_to_grid_ratio))
-        third_640 =( int(cur_cam_pnt[0]*C.F_to_grid_ratio), int(cur_cam_pnt[1]*C.F_to_grid_ratio))
-        first_x1, first_y1, first_x2, first_y2 = box.astype(int)*C.rpn_stride
-        second_x1, second_y1, second_x2, second_y2 = line_cam_box.astype(int)*C.rpn_stride
-        third_x1, third_y1, third_x2, third_y2 = cur_cam_box.astype(int)*C.rpn_stride
-        cv2.rectangle(src_img, (first_x1, first_y1), (first_x2, first_y2), color, 2)
-        cv2.rectangle(dst_img, (second_x1, second_y1), (second_x2, second_y2), color, 2)
-        cv2.rectangle(dst_img2, (third_x1, third_y1), (third_x2, third_y2), color, 2)
-        cv2.circle(src_img, magnified_cur_cam_center, 3, color, -1)
-        cv2.circle(dst_img, magnified_pnt, 3, color, -1)
-        cv2.circle(dst_img2, magnified_cur_cam_pnt, 3, color, -1)
-        print('first', cur_cam, first_640)
-        print('second', line_cam, second_640)
-        print('third', i, third_640)
-        src_img = cv2.resize(src_img, None, fx = .5, fy = .5)
-        dst_img = cv2.resize(dst_img, None, fx = .5, fy = .5)
-        dst_img2 = cv2.resize(dst_img2, None, fx = .5, fy = .5)
-        cv2.imshow('first', src_img)
-        cv2.imshow('second', dst_img)
-        cv2.imshow('third', dst_img2)
-        cv2.waitKey()
-    '''
-    return result
  
 def draw(X_list, Y_list_1d, image_data_list, debug_img_list, debug_num_pos_list) : 
     X_list, Y_list_1d, image_data_list, debug_img_list, debug_num_pos_list = next(data_gen_train)
@@ -2340,6 +2248,20 @@ def draw(X_list, Y_list_1d, image_data_list, debug_img_list, debug_num_pos_list)
         plt.imshow(img)
     plt.show()
 
+def draw_box(image, box, name):
+    color = (0, 255, 0)
+    x1, y1, x2, y2 = box
+    cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
+    image = cv2.resize(image, (320, 180))
+    cv2.imshow(name, image)
+
+def draw_box_from_idx(all_boxes, all_images, idx, rpn_stride, name):
+    cam_idx, H_idx, W_idx, A_idx = idx
+    image = np.copy(all_images[cam_idx])
+    box = all_boxes[(cam_idx, H_idx, W_idx, A_idx)]
+    box = box.astype(int)*rpn_stride
+    draw_box(image, box, name)
+ 
 def train():
     # Augmentation flag
     horizontal_flips = False # Augment with horizontal flips in training. 
@@ -2422,12 +2344,10 @@ def train():
         view_invariants.append(view_invariant)
 
     view_invariant_conc = view_invariant_conc_layer(view_invariants)
-    #view_invariant_train = view_invariant_train_layer(view_invariants, anchor_pos_neg_input)
     classifier = classifier_layer(shared_layers, roi_input, C.num_rois, num_cam, nb_classes=len(classes_count))
 
     model_rpn = Model(img_input, rpns)
     model_view_invariant = Model(img_input, view_invariant_conc)
-    #model_view_invariant_train = Model(img_input + [anchor_pos_neg_input], view_invariant_train)
     classifier_input = img_input + roi_input
     model_classifier = Model(classifier_input, classifier)
 
@@ -2443,7 +2363,6 @@ def train():
             print('loading weights from {}'.format(C.base_net_weights))
             model_rpn.load_weights(C.base_net_weights, by_name=True)
             model_view_invariant.load_weights(C.base_net_weights, by_name=True)
-            #model_view_invariant_train.load_weights(C.base_net_weights, by_name=True)
             model_classifier.load_weights(C.base_net_weights, by_name=True)
         except:
             print('Could not load pretrained model weights. Weights can be found in the keras application folder \
@@ -2470,7 +2389,7 @@ def train():
         r_loss_rpn_regr = record_df['loss_rpn_regr']
         r_loss_class_cls = record_df['loss_class_cls']
         r_loss_class_regr = record_df['loss_class_regr']
-        #r_loss_vi = record_df['loss_vi']
+        r_loss_vi = record_df['loss_vi']
         r_curr_loss = record_df['curr_loss']
         r_elapsed_time = record_df['elapsed_time']
         r_mAP = record_df['mAP']
@@ -2484,10 +2403,9 @@ def train():
     for i in range(num_cam) : 
         rpn_loss.extend([rpn_loss_cls(num_anchors), rpn_loss_regr(num_anchors)])
     model_rpn.compile(optimizer=optimizer, loss=rpn_loss)
-    model_view_invariant.compile(optimizer=optimizer_view_invariant, loss=view_invariant_loss(C.alpha, C.view_invar_feature_size))
+    model_view_invariant.compile(optimizer=optimizer_view_invariant, loss=view_invariant_loss(C.vi_alpha))
     model_classifier.compile(optimizer=optimizer_classifier, loss=[class_loss_cls, class_loss_regr(len(classes_count)-1, num_cam)], metrics={'dense_class_{}'.format(len(classes_count)): 'accuracy'})
     model_all.compile(optimizer='sgd', loss='mae')
-
 
     def named_logs(model, logs):
       result = {}
@@ -2505,7 +2423,7 @@ def train():
 
     total_epochs += num_epochs
 
-    losses = np.zeros((epoch_length, 5))
+    losses = np.zeros((epoch_length, 6))
     rpn_accuracy_rpn_monitor = []
     rpn_accuracy_for_epoch = []
 
@@ -2554,49 +2472,40 @@ def train():
                     rpn_boxs = P_rpn[cam_idx+1]
                     R = rpn_to_roi(rpn_probs, rpn_boxs, C, K.common.image_dim_ordering(), use_regr=True, overlap_thresh=0.7, max_boxes = C.num_nms)
                     R_list.append(R)
-                    '''
-                    if(iter_num == 0):
-                        _, nms_boxes, nms_probs = R
-                        img = debug_img[i].copy()
-                        color = (0, 255, 0)
-                        for b, p in zip(nms_boxes, nms_probs) :
-                            x1, y1, x2, y2 = b.astype(int)*C.rpn_stride
-                            cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
-                        color = (0, 0, 255)
-                        for b, p in zip(nms_boxes, nms_probs) :
-                            x1, y1, x2, y2 = b.astype(int)*C.rpn_stride
-                            cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
-                            break
-                        name = 'debug/mv_two/mv_epoch_' + str(epoch_num)+'_nms_cam_' + str(i) + '.jpg'
-                        #cv2.imwrite(name, img)
-                        img = cv2.resize(img, None, fx=.5, fy=.5)
-                        cv2.imshow(name, img)
-                    cv2.waitKey(0)
-                    #continue
-                    '''
                            
                 view_invariant_features = model_view_invariant.predict_on_batch(X)
-                with open('vi_featurs.pickle', 'wb') as fr :
-                    pickle.dump(view_invariant_features, fr)
+                anchor_pos_neg_idx = get_anchor_pos_neg_idx(R_list, img_data, view_invariant_features, C)
 
-                with open('R_list.pickle', 'wb') as fr : 
-                    pickle.dump(R_list, fr)
+                   
+                '''
+                all_boxes = [R[0] for R in R_list]
+                all_boxes = np.stack(all_boxes, 0) #(num_cam, 4, H, W, A)
+                all_boxes = all_boxes.transpose(0, 2, 3, 4, 1) #(num_cam, H, W, A, 4)
+                anc_idx, pos_idx, neg_idx = anchor_pos_neg_idx[0, :, :, :, 0, 0] #(num_sample, 4)
+                for cur_anc_idx, cur_pos_idx, cur_neg_idx in zip(anc_idx, pos_idx, neg_idx) :
+                    draw_box_from_idx(all_boxes, debug_img, cur_anc_idx, C.rpn_stride, 'anchor')
+                    draw_box_from_idx(all_boxes, debug_img, cur_pos_idx, C.rpn_stride, 'pos')
+                    draw_box_from_idx(all_boxes, debug_img, cur_neg_idx, C.rpn_stride, 'neg')
+                    cv2.waitKey(0)
+                '''
 
-                with open('img_data.pickle', 'wb') as fr : 
-                    pickle.dump(img_data, fr)
-
-                with open('C.pickle', 'wb') as fr : 
-                    pickle.dump(C, fr)
-
-                anchor_target_idx = get_anchor_target_idx(R_list, img_data, C)
-                if(anchor_target_idx.size == 0):
-                    print('continue')
+                if(anchor_pos_neg_idx.size == 0):
+                    print('anchor_pos_neg_idx.size == 0')
+                    print('loss_rpn_cls', loss_rpn[1], 'loss_rpn_regr', loss_rpn[2])
                     continue    
-                vi_loss = model_view_invariant.train_on_batch(X, anchor_target_idx)
+                vi_loss = model_view_invariant.train_on_batch(X, anchor_pos_neg_idx)
                 
                 # grouped_R : [[box1, .... ,box300], [box1, .... ,box300], [box1, .... ,box300]], len(grouped_R) = cam_num, top 300 grouped R where R in each cam is grouped by epipolar geometry. 
                 grouped_R = reid(view_invariant_features, R_list, C)
-                #grouped_R = epipolar(R_list, C, debug_img, iter_num)
+
+                '''
+                grouped_boxes = np.stack(grouped_R, 1) #(300, num_cam, 4)
+                grouped_boxes = grouped_boxes.astype(int)*C.rpn_stride
+                for cur_grouped_boxes in grouped_boxes :
+                    for cam_idx, box in enumerate(cur_grouped_boxes):
+                        draw_box(np.copy(debug_img[cam_idx]), box, str(cam_idx))
+                    cv2.waitKey(0)
+                '''
 
                 # note: calc_iou converts from (x1,y1,x2,y2) to (x,y,w,h) format
                 # X2: [bboxes1, bboxes2, ...,bboxes_num_cam], bboxes that iou > C.classifier_min_overlap for all gt bboxes in 300 non_max_suppression bboxes
@@ -2609,6 +2518,8 @@ def train():
                 if X2[0] is None:
                     rpn_accuracy_rpn_monitor.append(0)
                     rpn_accuracy_for_epoch.append(0)
+                    print('calc iou == 0')
+                    print('loss_rpn_cls', loss_rpn[1], 'loss_rpn_regr', loss_rpn[2], 'vi_loss', vi_loss)
                     continue
                 
                 # Find out the positive anchors and negative anchors
@@ -2677,10 +2588,6 @@ def train():
 
                 losses[iter_num, 5] = vi_loss
 
-#            losses[iter_num, 2] = 0
-#            losses[iter_num, 3] = 0
-#            losses[iter_num, 4] = 0
-
                 iter_num += 1
 
                 progbar.update(iter_num, [('rpn_cls', np.mean(losses[:iter_num, 0])), ('rpn_regr', np.mean(losses[:iter_num, 1])),
@@ -2705,7 +2612,7 @@ def train():
                         print('Loss RPN regression: {}'.format(loss_rpn_regr))
                         print('Loss Detector classifier: {}'.format(loss_class_cls))
                         print('Loss Detector regression: {}'.format(loss_class_regr))
-                        print('Loss VI: {}'.format(loss_vi))
+                        print('Loss vi: {}'.format(loss_vi))
                         print('Total loss: {}'.format(loss_rpn_cls + loss_rpn_regr + loss_class_cls + loss_class_regr+loss_vi))
                         print('Elapsed time: {}'.format(time.time() - start_time))
                         elapsed_time = (time.time()-start_time)/60
@@ -2780,10 +2687,10 @@ if __name__ == '__main__' :
     base_path = '/home/sap/frcnn_keras'
     train_path = '/home/sap/frcnn_keras/data/mv_train_two.txt' 
     test_path = '/home/sap/frcnn_keras/data/mv_train_two.txt' 
-    output_weight_path = '/home/sap/frcnn_keras/model/mv_two_model_frcnn_vgg.hdf5'
-    record_path = '/home/sap/frcnn_keras/model/mv_two_record.csv' # Record data (used to save the losses, classification accuracy and mean average precision)
+    output_weight_path = '/home/sap/frcnn_keras/model/mv_two_vi_model_frcnn_vgg.hdf5'
+    record_path = '/home/sap/frcnn_keras/model/mv_two_vi_record.csv' # Record data (used to save the losses, classification accuracy and mean average precision)
     base_weight_path = '/home/sap/frcnn_keras/model/mv_two_model_frcnn_vgg.hdf5'
-    config_output_filename = '/home/sap/frcnn_keras/mv_two_model_vgg_config.pickle'
+    config_output_filename = '/home/sap/frcnn_keras/mv_two_vi_model_vgg_config.pickle'
     num_rois = 4 # Number of RoIs to process at once.
     num_features = 512
     view_invar_feature_size = 128
