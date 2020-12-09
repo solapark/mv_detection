@@ -39,7 +39,7 @@ from keras.callbacks import TensorBoard
 from tensorflow.keras.utils import plot_model
 
 #os.environ['CUDA_VISIBLE_DEVICES']='0,1,3'
-os.environ['CUDA_VISIBLE_DEVICES']='3'
+os.environ['CUDA_VISIBLE_DEVICES']='1,2,3'
 class Config:
 
     def __init__(self):
@@ -104,7 +104,7 @@ class Config:
         self.F = 0
         self.epipolar_x_interval = 3
 
-        self.num_cam = 2
+        self.num_cam = 3
         self.num_nms = 300
     
         self.vi_max_overlap = .4
@@ -239,7 +239,7 @@ def get_test_model(input_shape_img, input_shape_features, num_cam, num_rois, num
         view_invariants.append(view_invariant)
 
     view_invariant_conc = view_invariant_conc_layer(view_invariants)
-    classifier = classifier_layer(feature_map_input, roi_input, num_rois, num_cam, nb_classes=num_classes)
+    classifier = classifier_layer(feature_map_input, roi_input, num_rois, C.num_features, num_cam, nb_classes=num_classes)
 
     model_rpn = Model(img_input, rpns)
     model_view_invariant = Model(rpn_body_input, view_invariant_conc)
@@ -576,10 +576,7 @@ def get_map(pred, gt, f):
 	return T, P
 
 
-def calc_map(config_output_filename, test_path) : 
-    with open(config_output_filename, 'rb') as f_in:
-        C = pickle.load(f_in)
-
+def calc_map(test_path) : 
     # turn off any data augmentation at test time
     C.use_horizontal_flips = False
     C.use_vertical_flips = False
@@ -655,10 +652,7 @@ def calc_map(config_output_filename, test_path) :
     print('After training %dk batches, the mean average precision is %0.3f'%(len(record_df), mean_average_prec))
 
 '''
-def show_demos(config_output_filename, test_path, bbox_threshold, num_demo):
-    with open(config_output_filename, 'rb') as f_in:
-        C = pickle.load(f_in)
-
+def show_demos(test_path, bbox_threshold, num_demo):
     # turn off any data augmentation at test time
     C.use_horizontal_flips = False
     C.use_vertical_flips = False
@@ -674,10 +668,7 @@ def show_demos(config_output_filename, test_path, bbox_threshold, num_demo):
     demo_loop(test_path, num_demo, model_rpn, model_classifier, bbox_threshold, C)
 '''
 
-def show_demos(config_output_filename, test_path, bbox_threshold, num_demo):
-    with open(config_output_filename, 'rb') as f_in:
-        C = pickle.load(f_in)
-
+def show_demos(test_path, bbox_threshold, num_demo):
     # turn off any data augmentation at test time
     C.use_horizontal_flips = False
     C.use_vertical_flips = False
@@ -1033,7 +1024,7 @@ def rpn_layer(base_layers, num_anchors):
     return [x_class, x_regr, base_layers]
 
 #def classifier_layer(base_layers, input_rois, num_rois, nb_classes = 4):
-def classifier_layer(base_layers, input_rois, num_rois, num_cam, nb_classes = 4):
+def classifier_layer(base_layers, input_rois, num_rois, num_feat, num_cam, nb_classes = 4):
     """Create a classifier layer
     
     Args:
@@ -1048,15 +1039,15 @@ def classifier_layer(base_layers, input_rois, num_rois, num_cam, nb_classes = 4)
     """
 
     input_shape = (num_rois,7,7,512)
-
     pooling_regions = 7
 
-    # out_roi_pool.shape = (1, num_rois, channels, pool_size, pool_size)
     # num_rois (4) 7x7 roi pooling
-    #out_roi_pool = RoiPoolingConv(pooling_regions, num_rois)([base_layers, input_rois])
+    reduce_channel = Conv2D(num_feat//num_cam, (3, 3), activation='relu', padding='same', name='reduce_channel')
     out_roi_pools = []
     for i in range(num_cam):
-        out_roi_pools.append(RoiPoolingConv(pooling_regions, num_rois)([base_layers[i], input_rois[i]])) #(1, 4, 7, 7, 512)
+        reduced_base_layer = reduce_channel(base_layers[i])
+        out_roi_pools.append(RoiPoolingConv(pooling_regions, num_rois)([reduced_base_layer, input_rois[i]])) #(1, 4, 7, 7, 512)
+        #out_roi_pools.append(RoiPoolingConv(pooling_regions, num_rois)([base_layers[i], input_rois[i]])) #(1, 4, 7, 7, 512)
     out_roi_pool = Concatenate(axis=-1, name='ViewPooling')(out_roi_pools)
     out_roi_pool_flat = TimeDistributed(Flatten(name='flatten'))(out_roi_pool)
     # Flatten the convlutional layer and connected to 2 FC and 2 dropout
@@ -2502,7 +2493,7 @@ def draw_box_from_idx(all_boxes, all_images, idx, rpn_stride, name):
     box = box.astype(int)*rpn_stride
     draw_box(image, box, name)
  
-def train():
+def train(train_path):
     # Augmentation flag
     horizontal_flips = False # Augment with horizontal flips in training. 
     vertical_flips = False   # Augment with vertical flips in training. 
@@ -2534,7 +2525,7 @@ def train():
     print(class_mapping)
 
 # Save the configuration
-    with open(config_output_filename, 'wb') as config_f:
+    with open(C.config_output_filename, 'wb') as config_f:
         pickle.dump(C,config_f)
         print('Config has been written to {}, and can be loaded when testing to ensure correct results'.format(config_output_filename))
 
@@ -2584,7 +2575,7 @@ def train():
         view_invariants.append(view_invariant)
 
     view_invariant_conc = view_invariant_conc_layer(view_invariants)
-    classifier = classifier_layer(shared_layers, roi_input, C.num_rois, num_cam, nb_classes=len(classes_count))
+    classifier = classifier_layer(shared_layers, roi_input, C.num_rois, C.num_features, num_cam, nb_classes=len(classes_count))
 
     model_rpn = Model(img_input, rpns)
     model_view_invariant = Model(img_input, view_invariant_conc)
@@ -2617,7 +2608,6 @@ def train():
         print('Loading weights from {}'.format(C.model_path))
         model_rpn.load_weights(C.model_path, by_name=True)
         model_view_invariant.load_weights(C.model_path, by_name=True)
-        #model_view_invariant_train.load_weights(C.model_path, by_name=True)
         model_classifier.load_weights(C.model_path, by_name=True)
         
         # Load the records
@@ -2758,8 +2748,8 @@ def train():
                 if X2[0] is None:
                     rpn_accuracy_rpn_monitor.append(0)
                     rpn_accuracy_for_epoch.append(0)
-                    print('calc iou == 0')
-                    print('loss_rpn_cls', loss_rpn[1], 'loss_rpn_regr', loss_rpn[2], 'vi_loss', vi_loss)
+                    #print('calc iou == 0')
+                    #print('loss_rpn_cls', loss_rpn[1], 'loss_rpn_regr', loss_rpn[2], 'vi_loss', vi_loss)
                     continue
                 
                 # Find out the positive anchors and negative anchors
@@ -2966,16 +2956,21 @@ def plot_record(record_df) :
     plt.show()
 if __name__ == '__main__' : 
 #start 
+    base_weight = 'mv_two_vi_model_frcnn_vgg.hdf5'
+    save_name = 'mv'
     base_path = '/home/sap/frcnn_keras'
-    train_path = '/home/sap/frcnn_keras/data/mv_train_two.txt' 
-    test_path = '/home/sap/frcnn_keras/data/mv_train_two.txt' 
-    output_weight_path = '/home/sap/frcnn_keras/model/mv_two_vi_model_frcnn_vgg.hdf5'
-    record_path = '/home/sap/frcnn_keras/model/mv_two_vi_record.csv' # Record data (used to save the losses, classification accuracy and mean average precision)
-    base_weight_path = '/home/sap/frcnn_keras/model/mv_two_model_frcnn_vgg.hdf5'
-    config_output_filename = '/home/sap/frcnn_keras/mv_two_vi_model_vgg_config.pickle'
-    num_rois = 4 # Number of RoIs to process at once.
-    num_features = 512
-    view_invar_feature_size = 128
+    data_folder = 'data'
+    model_folder = 'model'
+    record_folder = 'record'
+    config_folder = 'config'
+
+    train_path = '%s/%s/%s_train.txt'%(base_path, data_folder, save_name) 
+    test_path = '%s/%s/%s_test.txt'%(base_path, data_folder, save_name)
+    base_weight_path ='%s/%s/%s'%(base_path, model_folder, base_weight) 
+    output_weight_path = '%s/%s/%s_model.hdf5' %(base_path, model_folder, save_name)
+    config_output_filename = '%s/%s/%s_config.pickle'%(base_path, config_folder, save_name)
+    record_path = '%s/%s/%s_record.csv'%(base_path, record_folder, save_name)
+
     demo_bbox_threshold = 0.7
     num_demo = 10
     F01 = [[2.459393284555216e-07, 1.240428133324114e-05, -0.0019388276339150634], [1.3911908206709622e-05, -3.0469249778638727e-06, -0.00732105994034854], [-0.0017512954375120127, -0.00015617893705877073, 1.0]]
@@ -2987,15 +2982,19 @@ if __name__ == '__main__' :
     F00 = F11 = F22 = [[0.0]*3]*3
     F = np.array([[F00, F01, F02], [F10, F11, F12], [F20, F21, F22]])
 
-    C = Config()
-    C.record_path = record_path
-    C.model_path = output_weight_path
-    C.num_rois = num_rois
+    try : 
+        with open(config_output_filename, 'rb') as f_in:
+            C = pickle.load(f_in)
+    except : 
+        C = Config()
     C.base_net_weights = base_weight_path
+    C.model_path = output_weight_path
+    C.config_output_filename = config_output_filename
+    C.record_path = record_path
     C.F = F
 
-    #train()
-    #show_demos(config_output_filename, test_path, demo_bbox_threshold, num_demo)
-    calc_map(config_output_filename, test_path)
+    train(train_path)
+    #show_demos(test_path, demo_bbox_threshold, num_demo)
+    #calc_map(test_path)
 
 
