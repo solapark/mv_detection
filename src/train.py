@@ -1170,8 +1170,8 @@ def rpn_to_roi(rpn_layer, regr_layer, C, dim_ordering, use_regr=True, max_boxes=
 
 base_path = '/data3/sap/frcnn_keras'
 
-#train_path = '/data1/sap/frcnn_keras/data/train_tunacan.txt' 
-train_path = '/data3/sap/frcnn_keras/data/sv_interpark18_train.txt' 
+train_path = '/data1/sap/frcnn_keras/data/train.txt' 
+#train_path = '/data3/sap/frcnn_keras/data/sv_interpark18_train.txt' 
 
 num_rois = 4 # Number of RoIs to process at once.
 
@@ -1180,13 +1180,16 @@ horizontal_flips = True # Augment with horizontal flips in training.
 vertical_flips = True   # Augment with vertical flips in training. 
 rot_90 = True           # Augment with 90 degree rotations in training. 
 
-output_weight_path = os.path.join(base_path, 'model/sv_interpark18_%d_model.hdf5')
+output_weight_path = os.path.join(base_path, 'model/sv_interpark2_%d_model.hdf5')
+#output_weight_path = os.path.join(base_path, 'model/sv_interpark18_%d_model.hdf5')
 
-record_path = os.path.join(base_path, 'record/sv_interpark18_record.csv') # Record data (used to save the losses, classification accuracy and mean average precision)
+record_path = os.path.join(base_path, 'record/sv_interpark2_record.csv') # Record data (used to save the losses, classification accuracy and mean average precision)
+#record_path = os.path.join(base_path, 'record/sv_interpark18_record.csv') # Record data (used to save the losses, classification accuracy and mean average precision)
 
 base_weight_path = os.path.join(base_path, 'model/vgg16_weights_tf_dim_ordering_tf_kernels.h5')
 
-config_output_filename = os.path.join(base_path, 'config/sv_interpark18_config.pickle')
+config_output_filename = os.path.join(base_path, 'config/sv_interpark2_config.pickle')
+#config_output_filename = os.path.join(base_path, 'config/sv_interpark18_config.pickle')
 
 # Create the config
 C = Config()
