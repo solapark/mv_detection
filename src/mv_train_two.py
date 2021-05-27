@@ -2011,8 +2011,8 @@ def non_max_suppression_fast_multi_cam(boxes, probs, overlap_thresh=0.9, max_box
 
         # delete all indexes from the index list that have
         idxs = np.delete(idxs, np.concatenate(([last],
-            #np.where(np.all(overlap > overlap_thresh, 1))[0])))
-            np.where(np.any(overlap > overlap_thresh, 1))[0])))
+            np.where(np.all(overlap > overlap_thresh, 1))[0])))
+            #np.where(np.any(overlap > overlap_thresh, 1))[0])))
 
         if len(pick) >= max_boxes:
             break
@@ -2173,8 +2173,8 @@ def calc_iou(grouped_R, img_datas, C, class_mapping):
             IoUs.append(best_iou)
 
             # hard negative example
-            #if (best_iou_list < C.classifier_max_overlap).any():
-            if (best_iou_list < C.classifier_max_overlap).all():
+            if (best_iou_list < C.classifier_max_overlap).any():
+            #if (best_iou_list < C.classifier_max_overlap).all():
                 cls_name = 'bg'
             elif (C.classifier_max_overlap <= best_iou_list).all():
                 cls_name = bboxes_list[0][best_bbox]['class']
