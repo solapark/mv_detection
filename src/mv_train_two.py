@@ -3623,9 +3623,7 @@ def find_best_model(val_path, all_model_path):
 if __name__ == '__main__' : 
 #start 
     base_weight = 'mv_rpn_model.hdf5'
-    '''
-    save_name = 'mv2'
-    #save_name = 'mv'
+    save_name = 'mv_v2_interpark2'
     train_file = 'mv_train.txt'
     val_file = 'mv_val.txt'
     test_file = 'mv_test.txt'
@@ -3636,6 +3634,7 @@ if __name__ == '__main__' :
     val_file = 'mv_interpark18_val.txt'
     test_file = 'mv_interpark18_test.txt'
     base_path = '/data3/sap/frcnn_keras'
+    '''
 
     data_folder = 'data'
     model_folder = 'model'
@@ -3678,8 +3677,8 @@ if __name__ == '__main__' :
     C.vi_max_overlap = .3
     C.F = F
 
-    #train(train_path, val_path, result_img_path)
-    show_demos(test_path, demo_bbox_threshold, num_demo, result_img_path)
+    train(train_path, val_path, result_img_path)
+    #show_demos(test_path, demo_bbox_threshold, num_demo, result_img_path)
     #calc_map(test_path, result_img_path)
     #find_best_model(val_path, all_model_path)
 
