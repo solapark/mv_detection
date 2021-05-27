@@ -3622,6 +3622,7 @@ def find_best_model(val_path, all_model_path):
 
 if __name__ == '__main__' : 
 #start 
+    '''
     base_weight = 'mv_rpn_model.hdf5'
     save_name = 'mv_v2_interpark2'
     train_file = 'mv_train.txt'
@@ -3629,12 +3630,12 @@ if __name__ == '__main__' :
     test_file = 'mv_test.txt'
     base_path = '/data3/sap/frcnn_keras'
     '''
-    save_name = 'mv_interpark18'
+    base_weight = 'mv_rpn_model.hdf5'
+    save_name = 'mv_v2_interpark18'
     train_file = 'mv_interpark18_train.txt'
     val_file = 'mv_interpark18_val.txt'
     test_file = 'mv_interpark18_test.txt'
     base_path = '/data3/sap/frcnn_keras'
-    '''
 
     data_folder = 'data'
     model_folder = 'model'
