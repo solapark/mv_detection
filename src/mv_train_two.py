@@ -3208,7 +3208,7 @@ def train(train_path, val_path, result_img_path):
         model_classifier.load_weights(C.model_path, by_name=True)
         
         # Load the records
-        record_df = pd.read_csv(record_path)
+        record_df = pd.read_csv(record_path) if os.path.isfile(record_path) else pd.DataFrame(columns=['mean_overlapping_bboxes', 'class_acc', 'loss_rpn_cls', 'loss_rpn_regr', 'loss_class_cls', 'loss_class_regr', 'loss_vi', 'curr_loss', 'elapsed_time', 'mAP'])
 
         r_mean_overlapping_bboxes = record_df['mean_overlapping_bboxes']
         r_class_acc = record_df['class_acc']
@@ -3488,15 +3488,18 @@ def train(train_path, val_path, result_img_path):
                     curr_loss = loss_rpn_cls + loss_rpn_regr + loss_class_cls + loss_class_regr + loss_vi
                     iter_num = 0
 
-                    model_all.save_weights(C.model_path)
+                    model_path = C.model_path % (epoch_num+1)
+                    model_all.save_weights(model_path)
+                    cur_mAP = 0
+                    '''
                     cur_mAP = calc_map_from_model(val_path, [model_rpn, model_view_invariant, model_classifier], result_img_path)
                     #cur_mAP = calc_map(val_path, result_img_path)
-                    #if curr_loss < best_loss:
                     if cur_mAP > best_mAP:
                         if C.verbose:
                             print('Total mAP increased from {} to {}, saving weights'.format(cur_mAP,best_mAP))
                         best_mAP = cur_mAP
                         model_all.save_weights(C.best_model_path)
+                    '''
 
                     new_row = {'mean_overlapping_bboxes':round(mean_overlapping_bboxes, 3), 
                                'class_acc':round(class_acc, 3), 
@@ -3622,16 +3625,21 @@ def find_best_model(val_path, all_model_path):
 
 if __name__ == '__main__' : 
 #start 
+    #base_weight = 'mv_rpn_model.hdf5'
+    #base_weight = 'mv_v2_interpark2_best_model.hdf5'
+    #base_weight = 'mv_v2_interpark2_debug_model.hdf5'
     '''
-    base_weight = 'mv_rpn_model.hdf5'
-    save_name = 'mv_v2_interpark2'
+    base_weight = 'mv_v2_interpark2_debug_resume_model.hdf5'
+    save_name = 'mv_v2_interpark2_debug_resume2'
     train_file = 'mv_train.txt'
     val_file = 'mv_val.txt'
     test_file = 'mv_test.txt'
     base_path = '/data3/sap/frcnn_keras'
     '''
-    base_weight = 'mv_rpn_model.hdf5'
-    save_name = 'mv_v2_interpark18'
+
+    #base_weight = 'mv_rpn_model.hdf5'
+    base_weight = 'mv_v2_interpark18_model.hdf5'
+    save_name = 'mv_v2_interpark18_resume'
     train_file = 'mv_interpark18_train.txt'
     val_file = 'mv_interpark18_val.txt'
     test_file = 'mv_interpark18_test.txt'
@@ -3648,7 +3656,7 @@ if __name__ == '__main__' :
     val_path = '%s/%s/%s'%(base_path, data_folder, val_file)
     test_path = '%s/%s/%s'%(base_path, data_folder, test_file)
     base_weight_path ='%s/%s/%s'%(base_path, model_folder, base_weight) 
-    output_weight_path = '%s/%s/%s_model.hdf5' %(base_path, model_folder, save_name)
+    output_weight_path = '%s/%s/%s_%s_model.hdf5' %(base_path, model_folder, save_name, '%d')
     best_model_path = '%s/%s/%s_best_model.hdf5' %(base_path, model_folder, save_name)
     all_model_path = '%s/%s/%s_%s_model.hdf5' %(base_path, model_folder, save_name, '%d')
     config_output_filename = '%s/%s/%s_config.pickle'%(base_path, config_folder, save_name)
