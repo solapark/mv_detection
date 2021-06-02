@@ -42,6 +42,8 @@ from keras.callbacks import TensorBoard
 
 from tensorflow.keras.utils import plot_model
 
+import argparse 
+
 #os.environ['CUDA_VISIBLE_DEVICES']='0,1,3'
 class Config:
 
@@ -867,7 +869,7 @@ def calc_map(test_path, save_dir = None, model = None, model_path = None) :
     mAPs = []
     elapsed_time = []
     class_mapping = get_class_mapping(C)
-    print('strat calc map')
+    print('\n', model_path, 'calculating...')
     for idx, test_img_data in enumerate(test_imgs):
         #print('{}/{}'.format(idx,len(test_imgs)))
 
@@ -894,7 +896,7 @@ def calc_map(test_path, save_dir = None, model = None, model_path = None) :
         elapsed_time.append(time.time() - st)
         #print('Elapsed time = {}'.format(time.time() - st))
 
-        print(all_dets)
+        #print(all_dets)
         for cam_idx in range(C.num_cam) : 
             dets = all_dets[cam_idx]
             gt = test_img_data[cam_idx]['bboxes']
@@ -920,7 +922,8 @@ def calc_map(test_path, save_dir = None, model = None, model_path = None) :
         all_aps.append(ap)
     mAP = np.mean(np.array(all_aps))
     print('mAP = {}'.format(mAP))
-    print('elapsed_time per one scene = {}'.format(np.mean(np.array(elapsed_time))))
+    print('elapsed_time per one scene = {}'.format(np.sum(np.array(elapsed_time))))
+    print('%s\t%f' %('\t'.join(map(str, all_aps)), mAP))
     return mAP
 
 
@@ -2011,8 +2014,8 @@ def non_max_suppression_fast_multi_cam(boxes, probs, overlap_thresh=0.9, max_box
 
         # delete all indexes from the index list that have
         idxs = np.delete(idxs, np.concatenate(([last],
-            np.where(np.all(overlap > overlap_thresh, 1))[0])))
-            #np.where(np.any(overlap > overlap_thresh, 1))[0])))
+            #np.where(np.all(overlap > overlap_thresh, 1))[0])))
+            np.where(np.any(overlap > overlap_thresh, 1))[0])))
 
         if len(pick) >= max_boxes:
             break
@@ -3628,13 +3631,25 @@ if __name__ == '__main__' :
     #base_weight = 'mv_rpn_model.hdf5'
     #base_weight = 'mv_v2_interpark2_best_model.hdf5'
     #base_weight = 'mv_v2_interpark2_debug_model.hdf5'
-    '''
-    base_weight = 'mv_v2_interpark2_debug_resume_model.hdf5'
-    save_name = 'mv_v2_interpark2_debug_resume2'
-    train_file = 'mv_train.txt'
-    val_file = 'mv_val.txt'
-    test_file = 'mv_test.txt'
-    base_path = '/data3/sap/frcnn_keras'
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument('--base_weight', type=str, default='mv_v2_interpark2_debug_resume2_5_model.hdf5')
+    parser.add_argument('--save_name', type=str, default='mv_v2_interpark2_debug_resume3')
+    parser.add_argument('--train_file', type=str, default='mv_train.txt')
+    parser.add_argument('--val_file', type=str, default='mv_val.txt')
+    parser.add_argument('--test_file', type=str, default='mv_test.txt')
+    parser.add_argument('--mode', type=str, default='demo', choices=['train', 'val'])
+
+    args = parser.parse_args()
+
+    base_weight = args.base_weight
+    save_name = args.save_name
+    train_file = args.train_file
+    val_file = args.val_file
+    test_file = args.test_file
+    mode = args.mode
+
     '''
 
     #base_weight = 'mv_rpn_model.hdf5'
@@ -3644,7 +3659,9 @@ if __name__ == '__main__' :
     val_file = 'mv_interpark18_val.txt'
     test_file = 'mv_interpark18_test.txt'
     base_path = '/data3/sap/frcnn_keras'
+    '''
 
+    base_path = '/data3/sap/frcnn_keras'
     data_folder = 'data'
     model_folder = 'model'
     record_folder = 'record'
@@ -3686,9 +3703,12 @@ if __name__ == '__main__' :
     C.vi_max_overlap = .3
     C.F = F
 
-    train(train_path, val_path, result_img_path)
+    if mode == 'train' :
+        train(train_path, val_path, result_img_path)
+    elif mode == 'val' :
+        calc_map(test_path, result_img_path, model=None, model_path = base_weight_path)
+
     #show_demos(test_path, demo_bbox_threshold, num_demo, result_img_path)
-    #calc_map(test_path, result_img_path)
     #find_best_model(val_path, all_model_path)
 
 
