@@ -3640,6 +3640,7 @@ if __name__ == '__main__' :
     parser.add_argument('--val_file', type=str, default='mv_val.txt')
     parser.add_argument('--test_file', type=str, default='mv_test.txt')
     parser.add_argument('--mode', type=str, default='demo', choices=['train', 'val'])
+    parser.add_argument('--save_result', action='store_true', default = False)
 
     args = parser.parse_args()
 
@@ -3678,7 +3679,7 @@ if __name__ == '__main__' :
     all_model_path = '%s/%s/%s_%s_model.hdf5' %(base_path, model_folder, save_name, '%d')
     config_output_filename = '%s/%s/%s_config.pickle'%(base_path, config_folder, save_name)
     record_path = '%s/%s/%s_record.csv'%(base_path, record_folder, save_name)
-    result_img_path = '%s/%s/result-%s'%(base_path, result_img_folder, save_name)
+    result_img_path = '%s/%s/result-%s'%(base_path, result_img_folder, save_name) if args.save_result else None
     demo_bbox_threshold = 0.7
     num_demo = 100
     F01 = [[2.459393284555216e-07, 1.240428133324114e-05, -0.0019388276339150634], [1.3911908206709622e-05, -3.0469249778638727e-06, -0.00732105994034854], [-0.0017512954375120127, -0.00015617893705877073, 1.0]]
@@ -3706,7 +3707,7 @@ if __name__ == '__main__' :
     if mode == 'train' :
         train(train_path, val_path, result_img_path)
     elif mode == 'val' :
-        calc_map(test_path, result_img_path, model=None, model_path = base_weight_path)
+        calc_map(val_path, result_img_path, model=None, model_path = base_weight_path)
 
     #show_demos(test_path, demo_bbox_threshold, num_demo, result_img_path)
     #find_best_model(val_path, all_model_path)
