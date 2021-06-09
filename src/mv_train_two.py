@@ -839,7 +839,78 @@ def calc_map_from_model(test_path, model, save_dir = None) :
     #print('elapsed_time per one scene = {}'.format(np.mean(np.array(elapsed_time))))
     return mAP
 
+def calc_map_multiple_model(test_path, all_model_path, start_idx, end_idx):
+    # turn off any data augmentation at test time
+    C.use_horizontal_flips = False
+    C.use_vertical_flips = False
+    C.rot_90 = False
+    C.num_features = 512
 
+    input_shape_img = (None, None, 3)
+    input_shape_features = (None, None, C.num_features)
+    num_classes = len(C.class_mapping)
+    num_anchors = len(C.anchor_box_scales) * len(C.anchor_box_ratios)
+
+    model_rpn, model_view_invariant, model_classifier = get_test_model(input_shape_img, input_shape_features, C.num_cam, C.num_rois, num_anchors, num_classes, all_model_path%(start_idx))
+
+    # This might takes a while to parser the data
+    test_imgs, _, _ = get_data(test_path, C.num_cam)
+
+    class_mapping = get_class_mapping(C)
+
+    for i in range(start_idx, end_idx+1):
+        model_path = all_model_path%(i)
+        print('\nLoading weights from {}'.format(model_path))
+        model_rpn.load_weights(model_path, by_name=True)
+        model_view_invariant.load_weights(model_path, by_name=True)
+        model_classifier.load_weights(model_path, by_name=True)
+
+        T = {}
+        P = {}
+        mAPs = []
+        st = time.time()
+        for idx, test_img_data in enumerate(test_imgs):
+            img_list = get_img_list(test_img_data, C)
+            X_list, ratio, fx, fy = get_X_list(img_list, C)
+            bboxes, probs = get_bboxes_probs(X_list, model_rpn, model_view_invariant, model_classifier, 0, class_mapping, C, is_demo=0)
+
+            all_dets = [[] for _ in range(C.num_cam)]
+            for key in bboxes:
+                bbox = np.array(bboxes[key]) #(num_cam, num_box, 4)
+                new_boxes_all_cam, new_probs = non_max_suppression_fast_multi_cam(bbox, np.array(probs[key]), overlap_thresh=0.5)
+                for cam_idx in range(C.num_cam) : 
+                    img = img_list[cam_idx]
+                    new_boxes = new_boxes_all_cam[cam_idx] #(num_box, 4)
+                    for jk in range(new_boxes.shape[0]):
+                        (x1, y1, x2, y2) = new_boxes[jk,:]
+                        if(x1 == -C.rpn_stride) :
+                            continue 
+                        det = {'x1': x1, 'x2': x2, 'y1': y1, 'y2': y2, 'class': key, 'prob': new_probs[jk]}
+                        all_dets[cam_idx].append(det)
+
+            #print(all_dets)
+            for cam_idx in range(C.num_cam) : 
+                dets = all_dets[cam_idx]
+                gt = test_img_data[cam_idx]['bboxes']
+                t, p = get_map(dets, gt, (fx, fy))
+                for key in t.keys():
+                    if key not in T:
+                        T[key] = []
+                        P[key] = []
+                    T[key].extend(t[key])
+                    P[key].extend(p[key])
+
+        all_aps = []
+        for key in T.keys():
+            ap = average_precision_score(T[key], P[key])
+            ap = 0 if ap==1.0 else ap
+            print('{} AP: {}'.format(key, ap))
+            all_aps.append(ap)
+
+        mAP = np.mean(np.array(all_aps))
+        print('mAP = {}'.format(mAP))
+        print('elapsed_time per one scene = {}'.format(time.time() - st))
+        print('%s\t%f' %('\t'.join(map(str, all_aps)), mAP))
 
 def calc_map(test_path, save_dir = None, model = None, model_path = None) : 
     # turn off any data augmentation at test time
@@ -3639,7 +3710,9 @@ if __name__ == '__main__' :
     parser.add_argument('--train_file', type=str, default='mv_train.txt')
     parser.add_argument('--val_file', type=str, default='mv_val.txt')
     parser.add_argument('--test_file', type=str, default='mv_test.txt')
-    parser.add_argument('--mode', type=str, default='demo', choices=['train', 'val'])
+    parser.add_argument('--mode', type=str, default='demo', choices=['train', 'val', 'multi_val'])
+    parser.add_argument('--start_idx', type=int, help='start idx of model to validate')
+    parser.add_argument('--end_idx', type=int, help='end idx of model to validate')
     parser.add_argument('--save_result', action='store_true', default = False)
 
     args = parser.parse_args()
@@ -3708,6 +3781,8 @@ if __name__ == '__main__' :
         train(train_path, val_path, result_img_path)
     elif mode == 'val' :
         calc_map(val_path, result_img_path, model=None, model_path = base_weight_path)
+    elif mode == 'multi_val':
+        calc_map_multiple_model(val_path, all_model_path, args.start_idx, args.end_idx)
 
     #show_demos(test_path, demo_bbox_threshold, num_demo, result_img_path)
     #find_best_model(val_path, all_model_path)
