@@ -3357,6 +3357,7 @@ def train(train_path, val_path, result_img_path):
 
                 # Generate X (x_img) and label Y ([y_rpn_cls, y_rpn_regr])
                 X, Y, img_data, debug_img, debug_num_pos = next(data_gen_train)
+                print('\n', img_data)
 
                 # Train rpn model and get loss value [_, loss_rpn_cls, loss_rpn_regr]
                 loss_rpn = model_rpn.train_on_batch(X, Y)
@@ -3471,9 +3472,6 @@ def train(train_path, val_path, result_img_path):
 
                 if C.num_rois > 1:
                     # If number of positive anchors is larger than 4//2 = 2, randomly choose 2 pos samples
-                    if len(pos_samples) > 0 :
-                        print(img_data)
-                        print('pos_samples > 0')
                     if len(pos_samples) < C.num_rois//2:
                         selected_pos_samples = pos_samples.tolist()
                     else:
