@@ -1063,7 +1063,7 @@ def get_data(input_path, num_cam):
 
         for line in f:
             # Print process
-            sys.stdout.write('\r'+'idx=' + str(i))
+            sys.stdout.write('\r'+'idx=' + str(j))
             j += 1
             
             line_split = line.strip().split(',')
