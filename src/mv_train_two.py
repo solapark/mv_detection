@@ -984,7 +984,7 @@ def get_data(input_path, num_cam):
 
     visualise = True
 
-    i = 1
+    j = 1
     
     with open(input_path,'r') as f:
 
@@ -993,7 +993,7 @@ def get_data(input_path, num_cam):
         for line in f:
             # Print process
             sys.stdout.write('\r'+'idx=' + str(i))
-            i += 1
+            j += 1
             
             line_split = line.strip().split(',')
             labels_in_cam = []
