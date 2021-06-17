@@ -1168,10 +1168,21 @@ def rpn_to_roi(rpn_layer, regr_layer, C, dim_ordering, use_regr=True, max_boxes=
 
 	return result
 
+import argparse 
+parser = argparse.ArgumentParser()
+parser.add_argument('--save_name', type=str, default='sv_interpark18')
+parser.add_argument('--train_path', type=str, default='/data3/sap/frcnn_keras/data/sv_interpark18_train.txt')
+parser.add_argument('--base_weight', type=str, default='vgg16_weights_tf_dim_ordering_tf_kernels.h5')
+
+args = parser.parse_args()
+
 base_path = '/data3/sap/frcnn_keras'
 
-train_path = '/data1/sap/frcnn_keras/data/train.txt' 
-#train_path = '/data3/sap/frcnn_keras/data/sv_interpark18_train.txt' 
+train_path = args.train_path
+record_path = os.path.join(base_path, 'record', '%s_record.csv'%(args.save_name)) 
+config_output_filename = os.path.join(base_path, 'config', '%s_config.pickle'%(args.save_name))
+base_weight_path = os.path.join(base_path, 'model', args.base_weight)
+output_weight_path = os.path.join(base_path, 'model', '%s_%s_model.hdf5'%(args.save_name, '%d'))
 
 num_rois = 4 # Number of RoIs to process at once.
 
@@ -1180,16 +1191,7 @@ horizontal_flips = True # Augment with horizontal flips in training.
 vertical_flips = True   # Augment with vertical flips in training. 
 rot_90 = True           # Augment with 90 degree rotations in training. 
 
-output_weight_path = os.path.join(base_path, 'model/sv_interpark2_%d_model.hdf5')
-#output_weight_path = os.path.join(base_path, 'model/sv_interpark18_%d_model.hdf5')
 
-record_path = os.path.join(base_path, 'record/sv_interpark2_record.csv') # Record data (used to save the losses, classification accuracy and mean average precision)
-#record_path = os.path.join(base_path, 'record/sv_interpark18_record.csv') # Record data (used to save the losses, classification accuracy and mean average precision)
-
-base_weight_path = os.path.join(base_path, 'model/vgg16_weights_tf_dim_ordering_tf_kernels.h5')
-
-config_output_filename = os.path.join(base_path, 'config/sv_interpark2_config.pickle')
-#config_output_filename = os.path.join(base_path, 'config/sv_interpark18_config.pickle')
 
 # Create the config
 C = Config()
