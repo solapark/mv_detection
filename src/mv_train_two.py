@@ -3708,7 +3708,7 @@ if __name__ == '__main__' :
     parser.add_argument('--train_file', type=str, default='mv_train.txt')
     parser.add_argument('--val_file', type=str, default='mv_val.txt')
     parser.add_argument('--test_file', type=str, default='mv_test.txt')
-    parser.add_argument('--mode', type=str, default='demo', choices=['train', 'val', 'multi_val'])
+    parser.add_argument('--mode', type=str, default='demo', choices=['train', 'val', 'multi_val', 'test'])
     parser.add_argument('--start_idx', type=int, help='start idx of model to validate')
     parser.add_argument('--end_idx', type=int, help='end idx of model to validate')
     parser.add_argument('--save_result', action='store_true', default = False)
@@ -3781,6 +3781,9 @@ if __name__ == '__main__' :
         calc_map(val_path, result_img_path, model=None, model_path = base_weight_path)
     elif mode == 'multi_val':
         calc_map_multiple_model(val_path, all_model_path, args.start_idx, args.end_idx)
+    elif mode == 'test' :
+        calc_map(val_path, result_img_path, model=None, model_path = base_weight_path)
+
 
     #show_demos(test_path, demo_bbox_threshold, num_demo, result_img_path)
     #find_best_model(val_path, all_model_path)
