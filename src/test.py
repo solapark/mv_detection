@@ -21,6 +21,7 @@ from matplotlib import pyplot as plt
 import tensorflow as tf
 import pandas as pd
 import os
+from tqdm import tqdm
 
 from sklearn.metrics import average_precision_score
 
@@ -48,7 +49,7 @@ config.gpu_options.per_process_gpu_memory_fraction = 0.3
 set_session(tf.Session(config=config))
 
 class Log_manager:
-    def __init__(self, save_dir, file_name = 'log.csv'):
+    def __init__(self, save_dir, file_name):
         self.path = os.path.join(save_dir, file_name)
         f = open(self.path, 'w')
         f.close()
@@ -128,6 +129,8 @@ def get_data(input_path):
         class_mapping: dict{key:class_name, value: idx}
             e.g. {'Car': 0, 'Mobile phone': 1, 'Person': 2}
     """
+    print('Parser the data from annotation file')
+
     found_bg = False
     all_imgs = {}
 
@@ -143,7 +146,7 @@ def get_data(input_path):
 
         #print('Parsing annotation files')
 
-        for line in f:
+        for line in tqdm(f):
 
             # Print process
             #sys.stdout.write('\r'+'idx=' + str(i))
@@ -1029,6 +1032,7 @@ parser.add_argument('--model_idx', type=int)
 parser.add_argument('--progbar', action='store_true')
 parser.add_argument('--load_pickle', action='store_true')
 parser.add_argument('--log_output', action='store_true')
+parser.add_argument('--log_name', type=str, default = 'log.csv')
 parser.add_argument('--save_img', action='store_true')
 parser.add_argument('--val', action='store_true')
 
@@ -1311,11 +1315,14 @@ if args.load_pickle :
 else :
     test_imgs, _, _ = get_data(test_path)
 
+#test_imgs_f = open(test_path.replace('txt', 'pickle'), 'wb')
+#pickle.dump(test_imgs,test_imgs_f)
+
 testset_basename = os.path.basename(test_path)
 testset = os.path.splitext(testset_basename)[0]
 save_dir = '%s/result/result-%s_model_%d/%s'%(base_path, save_name, model_idx, testset)
 os.makedirs(save_dir, exist_ok=True) 
-output_log = Log_manager(save_dir) 
+output_log = Log_manager(save_dir, args.log_name) 
 
 sample_img = cv2.imread(test_imgs[0]['filepath'])
 ratio = float(C.im_size)/min(sample_img.shape[0], sample_img.shape[1])
@@ -1419,7 +1426,9 @@ for idx, img_data in enumerate(test_imgs):
 
     elapsed_time.append(time.time() - st)
     #print('Elapsed time = {}'.format(time.time() - st))
-    t, p = get_map(all_dets, img_data['bboxes'], (fx, fy))
+
+    if args.val :
+        t, p = get_map(all_dets, img_data['bboxes'], (fx, fy))
 
     if args.save_img :
         if idx % 3 == 0 and idx:
@@ -1468,7 +1477,7 @@ if args.val :
     all_aps = []
     for key in list(C.class_mapping.keys())[:-1]:
         ap = average_precision_score(T[key], P[key]) if len(T[key]) else 0
-        #if ap == 1.0 : ap = 0.0
+        if ap == 1.0 : ap = 0.0
         print('{} AP: {}'.format(key, ap))
         all_aps.append(ap)
     print('mAP = {}'.format(np.mean(np.array(all_aps))))
