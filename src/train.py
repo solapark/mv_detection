@@ -1395,7 +1395,8 @@ model_all.compile(optimizer='sgd', loss='mae')
 total_epochs = len(record_df)
 r_epochs = len(record_df)
 
-epoch_length = 500
+#epoch_length = 500
+epoch_length = len(train_imgs)
 num_epochs = 2000
 iter_num = 0
 
