@@ -1184,6 +1184,7 @@ train_path = args.train_path
 record_path = os.path.join(base_path, 'record', '%s_record.csv'%(args.save_name)) 
 config_output_filename = os.path.join(base_path, 'config', '%s_config.pickle'%(args.save_name))
 base_weight_path = os.path.join(base_path, 'model', args.base_weight)
+#output_weight_path = os.path.join(base_path, 'model', '%s_%s_model.hdf5'%(args.save_name, '%d'))
 output_weight_path = os.path.join(base_path, 'model', '%s_%s_model.hdf5'%(args.save_name, '%d'))
 
 num_rois = 4 # Number of RoIs to process at once.
